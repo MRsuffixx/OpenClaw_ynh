@@ -198,7 +198,7 @@ ynh_print_info "Installer downloaded and verified (SHA256: ${INSTALL_CLI_SHA256:
 
 ynh_script_progression "Running OpenClaw installer as user '$app'..."
 
-local install_log="/var/log/$app/install.log"
+install_log="/var/log/$app/install.log"
 
 {
     echo "========================================"
