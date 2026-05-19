@@ -227,7 +227,7 @@ download_verified() {
         ynh_die "download_verified: computed SHA256 is empty"
     fi
 
-    if [[ "$actual_sha" != "$expected_sha" ]]; then
+    if [[ "${actual_sha,,}" != "${expected_sha,,}" ]]; then
         rm -f "$dest"
         ynh_die "download_verified: SHA256 mismatch for $url (expected: ${expected_sha:0:16}..., got: ${actual_sha:0:16}...)"
     fi
