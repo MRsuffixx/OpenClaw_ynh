@@ -1,85 +1,211 @@
-# Emballage d'une application, à partir de cet exemple
+# OpenClaw pour YunoHost
 
-* Copier cette application avant de travailler dessus, en utilisant le bouton ['Use this template'](https://github.com/new?template_name=example_ynh&template_owner=YunoHost) sur le repo GitHub.
-* Editer le fichier `manifest.toml` avec les informations spécifiques à l'application.
-* Editer les scripts `install`, `upgrade`, `remove`, `backup` et `restore`, et tous les fichiers de conf pertinents dans `conf/`.
-  * Utiliser la [documentation sur les aides aux scripts] (https://yunohost.org/packaging_apps_helpers).
-* Éditez aussi les scripts `change_url` et `config`, ou supprimez-les si vous n'en avez pas l'utilité.
-* Ajouter un fichier `LICENSE` pour le paquet. NB : ce fichier LICENSE n'est pas nécessairement la LICENSE de l'application en amont - c'est seulement la LICENSE avec laquelle vous voulez que le code de ce paquet soit publié ;). Nous recommandons d'utiliser [l'AGPL-3] (https://www.gnu.org/licenses/agpl-3.0.txt).
-* Editer les fichiers dans le répertoire `doc/`.
-* Les fichiers `README.md` doivent être générés automatiquement par <https://github.com/YunoHost/apps/tree/main/tools/readme_generator>
+[![Niveau d'intégration](https://dash.yunohost.org/integration/openclaw.svg)](https://dash.yunohost.org/appci/app/openclaw) ![État de maintenance](https://ci-apps.yunohost.org/ci/badges/openclaw.maintain.svg)
 
----
-<!--
-N.B. : Ce README a été généré automatiquement par https://github.com/YunoHost/apps/tree/main/tools/readme_generator
-Il ne doit PAS être édité à la main.
--->
-
-# Exemple d'app pour YunoHost
-
-[![Niveau d'intégration](https://dash.yunohost.org/integration/example.svg)](https://dash.yunohost.org/appci/app/example) ![Statut du fonctionnement](https://ci-apps.yunohost.org/ci/badges/example.status.svg) ![Statut de maintenance](https://ci-apps.yunohost.org/ci/badges/example.maintain.svg)
-[![Installer Example app avec YunoHost](https://install-app.yunohost.org/install-with-yunohost.svg)](https://install-app.yunohost.org/?app=example)
-
-*[Read this readme in english.](./README.md)*
-
-> *Ce package vous permet d'installer Example app rapidement et simplement sur un serveur YunoHost.
-Si vous n'avez pas YunoHost, regardez [ici](https://yunohost.org/#/install) pour savoir comment l'installer et en profiter.*
+> OpenClaw est une passerelle IA auto-hébergée et un runtime d'agents qui connecte plusieurs plateformes de messagerie via une passerelle unifiée, avec support des agents IA autonomes.
 
 ## Vue d'ensemble
 
-Some long and extensive description of what the app is and does, lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+OpenClaw est une passerelle IA et un runtime d'agents qui fonctionne sur votre propre serveur. Il expose une passerelle WebSocket/HTTP sur `127.0.0.1:18789`, conçue pour être accedée exclusivement via NGINX avec terminaison TLS et passage SSO YunoHost.
 
-### Features
+### Fonctionnalités principales
 
-- Ut enim ad minim veniam, quis nostrud exercitation ullamco ;
-- Laboris nisi ut aliquip ex ea commodo consequat ;
-- Duis aute irure dolor in reprehenderit in voluptate ;
-- Velit esse cillum dolore eu fugiat nulla pariatur ;
-- Excepteur sint occaecat cupidatat non proident, sunt in culpa."
+- **Messagerie multi-canaux** : Connectez des bots Telegram, des intégrations Discord, Slack, e-mail et d'autres plateformes de messagerie
+- **Flux de travail agentiques** : Déployez des agents IA capables de raisonner, d'utiliser des outils et d'exécuter des tâches de manière autonome
+- **Passerelle WebSocket/HTTP** : API flexible avec streaming bidirectionnel pour les intégrations externes
+- **Intégration YunoHost** : Authentification SSO automatique via vos identifiants utilisateur YunoHost
+- **Auto-hébergé** : Contrôle total sur vos données et votre infrastructure
+- **Multi-instances** : Exécutez plusieurs instances indépendantes sur un serveur YunoHost
 
+## Limitations
 
-**Version incluse :** 1.0~ynh1
+- Le canal de mise à jour `dev` n'est pas pris en charge par ce paquet
+- ARM 32 bits (`armhf`) n'est pas pris en charge — uniquement `amd64` et `arm64`
+- La passerelle se lie exclusivement à `127.0.0.1` et n'est jamais exposée directement à Internet
 
-**Démo :** https://demo.example.com
+## Prérequis
 
-## Captures d'écran
+- YunoHost 11.2 ou ultérieur
+- Architecture : `amd64` ou `arm64`
+- Au moins 1 Go d'espace disque libre
+- 512 Mo de RAM pour l'installation, 256 Mo pour l'exécution
 
-![Capture d'écran de Example app](./doc/screenshots/example.jpg)
+## Installation
 
-## Avertissements / informations importantes
+### Depuis le panneau d'administration YunoHost
 
-* Any known limitations, constrains or stuff not working, such as (but not limited to):
-    * requiring a full dedicated domain ?
-    * architectures not supported ?
-    * not-working single-sign on or LDAP integration ?
-    * the app requires an important amount of RAM / disk / .. to install or to work properly
-    * etc...
+1. Connectez-vous à votre interface d'administration YunoHost
+2. Accédez à **Apps** → **Installer**
+3. Recherchez "OpenClaw" et cliquez sur **Installer**
+4. Remplissez les arguments d'installation :
+   - **Domaine** : Choisissez un domaine ou un sous-domaine
+   - **Chemin** : Typiquement `/`
+   - **Canal de mise à jour** : `stable` (recommandé) ou `beta`
+   - **Version OpenClaw** : `latest` pour la dernière version stable automatique, ou spécifiez une version
+   - **Jeton d'authentification de la passerelle** : Laissez vide pour auto-générer, ou fournissez le vôtre (min. 16 caractères)
+   - **Activer les mises à jour automatiques** : `non` (recommandé) ou `oui`
+5. Cliquez sur **Installer**
 
-* Other infos that people should be aware of, such as:
-    * any specific step to perform after installing (such as manually finishing the install, specific admin credentials, ...)
-    * how to configure / administrate the application if it ain't obvious
-    * upgrade process / specificities / things to be aware of ?
-    * security considerations ?
+### Depuis la ligne de commande
 
-## Documentations et ressources
-
-* Site officiel de l'app : <https://example.com>
-* Documentation officielle utilisateur : <https://yunohost.org/apps>
-* Documentation officielle de l'admin : <https://yunohost.org/packaging_apps>
-* Dépôt de code officiel de l'app : <https://some.forge.com/example/example>
-* Documentation YunoHost pour cette app : <https://yunohost.org/app_example>
-* Signaler un bug : <https://github.com/YunoHost-Apps/example_ynh/issues>
-
-## Informations pour les développeurs
-
-Merci de faire vos pull request sur la [branche testing](https://github.com/YunoHost-Apps/example_ynh/tree/testing).
-
-Pour essayer la branche testing, procédez comme suit.
-
-``` bash
-sudo yunohost app install https://github.com/YunoHost-Apps/example_ynh/tree/testing --debug
-ou
-sudo yunohost app upgrade example -u https://github.com/YunoHost-Apps/example_ynh/tree/testing --debug
+```bash
+sudo yunohost app install https://github.com/MRsuffixx/OpenClaw_ynh
 ```
 
-**Plus d'infos sur le packaging d'applications :** <https://yunohost.org/packaging_apps>
+### Tester la version de développement
+
+```bash
+sudo yunohost app install https://github.com/MRsuffixx/OpenClaw_ynh/tree/testing --debug
+```
+
+## Configuration
+
+Après l'installation, accédez au panneau de configuration depuis **Apps** → **OpenClaw** → **Panneau de configuration** pour gérer :
+
+- **Canal de mise à jour** : Basculez entre `stable` et `beta`
+- **Mise à jour automatique** : Activez ou désactivez les mises à jour automatiques
+- **Jeton d'authentification de la passerelle** : Mettez à jour le secret partagé pour l'accès API
+
+## Utilisation
+
+### Accéder à la passerelle
+
+Ouvrez `https://votre-domaine.com/` dans votre navigateur. L'authentification est automatique via SSO YunoHost — connectez-vous avec vos identifiants YunoHost.
+
+### Commandes CLI
+
+Exécutez les commandes OpenClaw en tant qu'utilisateur de l'application :
+
+```bash
+sudo -u openclaw openclaw <commande>
+```
+
+Pour les installations multi-instances, utilisez le nom de l'instance (par ex. `openclaw__2`) :
+
+```bash
+sudo -u openclaw__2 openclaw <commande>
+```
+
+### Commandes courantes
+
+| Commande | Description |
+|----------|-------------|
+| `openclaw gateway start` | Démarrer la passerelle |
+| `openclaw gateway stop` | Arrêter la passerelle |
+| `openclaw gateway restart` | Redémarrer la passerelle |
+| `openclaw channel add <nom>` | Ajouter un canal de messagerie |
+| `openclaw doctor` | Exécuter les diagnostics de santé |
+| `openclaw --version` | Afficher la version installée |
+
+### Vérification de santé
+
+```bash
+curl http://127.0.0.1:18789/readyz
+```
+
+### Journaux
+
+| Journal | Chemin |
+|---------|--------|
+| Sortie standard de la passerelle | `/var/log/openclaw/openclaw.log` |
+| Erreurs de la passerelle | `/var/log/openclaw/error.log` |
+| Journal d'installation | `/var/log/openclaw/install.log` |
+| Journal de mise à niveau | `/var/log/openclaw/upgrade.log` |
+
+## Mise à niveau
+
+### Depuis le panneau d'administration
+
+Accédez à **Apps** → **OpenClaw** → **Mettre à jour**
+
+### Depuis la ligne de commande
+
+```bash
+sudo yunohost app upgrade openclaw
+```
+
+Pour mettre à niveau vers la version de test :
+
+```bash
+sudo yunohost app upgrade openclaw -u https://github.com/MRsuffixx/OpenClaw_ynh/tree/testing --debug
+```
+
+## Sauvegarde et restauration
+
+### Créer une sauvegarde
+
+```bash
+sudo yunohost backup create --apps openclaw
+```
+
+Cela inclut le répertoire de données complet avec tous les identifiants et l'état des agents.
+
+### Restaurer à partir d'une sauvegarde
+
+```bash
+sudo yunohost backup restore <nom_sauvegarde> --apps openclaw
+```
+
+### Conservation des données
+
+- Le répertoire de données (`/home/openclaw/.openclaw/`) est **conservé** après la suppression de l'application
+- Utilisez `--purge` avec `yunohost app remove openclaw --purge` pour supprimer définitivement toutes les données
+- La sauvegarde automatique de sécurité avant mise à niveau ne **inclut pas** le répertoire de données (il peut être volumineux)
+
+## Suppression
+
+```bash
+sudo yunohost app remove openclaw
+```
+
+Cela supprime l'application mais conserve vos données. Pour supprimer toutes les données :
+
+```bash
+sudo yunohost app remove openclaw --purge
+```
+
+## Architecture
+
+```
+Navigateur / SSO YunoHost
+        │
+        ▼
+   NGINX (terminaison TLS, injection d'en-têtes SSO)
+        │  X-Remote-User: <ldap_uid>
+        │  X-Remote-Email: <email>
+        │  Upgrade: websocket
+        ▼
+   Passerelle OpenClaw (127.0.0.1:18789)
+        │
+        ├── ~/.openclaw/openclaw.json     (configuration runtime)
+        ├── ~/.openclaw/credentials/      (jetons des canaux)
+        ├── ~/.openclaw/agents/           (état des agents)
+        └── ~/.openclaw/workspace/        (compétences, mémoires)
+```
+
+## Documentation et ressources
+
+- **Documentation upstream** : https://docs.openclaw.ai
+- **Site web upstream** : https://openclaw.ai
+- **Code upstream** : https://github.com/openclaw/openclaw
+- **Documentation d'empaquetage YunoHost** : https://doc.yunohost.org/dev/packaging/
+- **Signaler un bug** : https://github.com/MRsuffixx/OpenClaw_ynh/issues
+
+## Contribution
+
+Veuillez envoyer les pull requests sur la branche `testing`.
+
+Pour tester la branche de développement :
+
+```bash
+sudo yunohost app install https://github.com/MRsuffixx/OpenClaw_ynh/tree/testing --debug
+sudo yunohost app upgrade openclaw -u https://github.com/MRsuffixx/OpenClaw_ynh/tree/testing --debug
+```
+
+## Version distribuée
+
+**Version OpenClaw** : 1.0~ynh1
+
+---
+
+*Plus d'informations concernant l'empaquetage d'applications :* https://doc.yunohost.org/dev/packaging/

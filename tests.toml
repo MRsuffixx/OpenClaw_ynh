@@ -9,4 +9,13 @@ test_format = 1.0
     test_upgrade_from.1.0~ynh1.name = "Upgrade from 1.0~ynh1"
     test_upgrade_from.1.0~ynh1.args.openclaw_version = "latest"
     test_upgrade_from.1.0~ynh1.args.update_channel = "stable"
-    test_upgrade_from.1.0~ynh1.args.auto_update = false
+    test_upgrade_from.1.0~ynh1.args.auto_update = "0"
+
+[testing]
+
+    name = "Testing branch"
+    only = ["install.root"]
+
+    preinstall = """
+    sudo yunohost tools diagnosis --output-as json | jq '.apps[] | select(.id == "openclaw")'
+    """
