@@ -250,7 +250,6 @@ if [[ ! -d "$OPENCLAW_STATE_DIR" ]]; then
     ynh_die "OpenClaw state directory not found at $OPENCLAW_STATE_DIR after installation"
 fi
 
-openclaw_version_installed
 openclaw_version_installed="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || {
     ynh_die "Failed to run '$OPENCLAW_BIN --version'. Binary may be corrupted."
 }
