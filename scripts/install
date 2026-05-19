@@ -1,6 +1,26 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE INSTALL SCRIPT
+#=================================================
+# Implements the 13-step flow defined in AGENTS.md §6.1
+#
+# This script is idempotent: it can be run multiple times safely.
+# All destructive operations are guarded with pre-checks.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: Abort if not running as root
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
@@ -8,127 +28,466 @@ source _common.sh
 source /usr/share/yunohost/helpers
 
 #=================================================
-# RETRIEVE SETTINGS
+# TRAP: CLEANUP ON ERROR
 #=================================================
+
+on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        ynh_print_err "Installation failed with exit code $exit_code"
+        ynh_print_err "Check logs at /var/log/$app/install.log"
+    fi
+}
+
+trap on_error ERR
+
+#=================================================
+# STEP 0: GUARD: CHECK IF ALREADY INSTALLED
+#=================================================
+
+if [[ -x "$(openclaw_bin)" ]] && [[ -f "$data_dir/openclaw.json" ]]; then
+    ynh_print_warn "OpenClaw appears to already be installed at $data_dir"
+    ynh_print_warn "Aborting to prevent overwriting existing installation."
+    ynh_print_warn "Remove the existing installation first with: yunohost app remove $app"
+    exit 0
+fi
+
+#=================================================
+# STEP 1: RETRIEVE AND VALIDATE SETTINGS
+#=================================================
+
+ynh_script_progression "Validating installation parameters..."
 
 openclaw_version="${openclaw_version:-latest}"
 update_channel="${update_channel:-stable}"
 gateway_auth_token="${gateway_auth_token:-}"
 auto_update="${auto_update:-0}"
 
+case "$update_channel" in
+    stable|beta|dev) ;;
+    *)
+        ynh_die "Invalid update channel: '$update_channel'. Must be one of: stable, beta, dev"
+        ;;
+esac
+
+case "$auto_update" in
+    0|1|true|false) ;;
+    *)
+        ynh_die "Invalid auto_update value: '$auto_update'. Must be 0, 1, true, or false."
+        ;;
+esac
+
 if [[ -z "$gateway_auth_token" ]]; then
-    gateway_auth_token="$(openssl rand -hex 32 2>/dev/null || dd if=/dev/urandom bs=1 count=32 2>/dev/null | xxd -p)"
+    ynh_print_info "Generating gateway auth token..."
+    if command -v openssl &>/dev/null; then
+        gateway_auth_token="$(openssl rand -hex 32 2>/dev/null)" || {
+            ynh_print_warn "openssl rand failed, trying alternative method..."
+            gateway_auth_token="$(dd if=/dev/urandom bs=1 count=32 2>/dev/null | xxd -p)"
+        }
+    else
+        gateway_auth_token="$(dd if=/dev/urandom bs=1 count=32 2>/dev/null | xxd -p)"
+    fi
+    if [[ -z "$gateway_auth_token" ]]; then
+        ynh_die "Failed to generate gateway auth token. Please provide one manually."
+    fi
+    ynh_print_info "Gateway auth token generated successfully"
 fi
 
+if [[ ${#gateway_auth_token} -lt 16 ]]; then
+    ynh_die "Gateway auth token must be at least 16 characters. Provided token is ${#gateway_auth_token} characters."
+fi
+
+# Export for use by ynh_config_add template substitution
+export gateway_auth_token
+export update_channel
+export auto_update
+
+ynh_print_info "Installation parameters validated:"
+ynh_print_info "  - openclaw_version: $openclaw_version"
+ynh_print_info "  - update_channel: $update_channel"
+ynh_print_info "  - auto_update: $auto_update"
+ynh_print_info "  - gateway_auth_token: <redacted, ${#gateway_auth_token} chars>"
+
 #=================================================
-# CREATE LOG DIRECTORY
+# STEP 2: ENSURE LOG DIRECTORY EXISTS
 #=================================================
 
-mkdir -p "/var/log/$app"
-chown "$app:$app" "/var/log/$app"
+ynh_script_progression "Creating log directory..."
+
+if [[ ! -d "/var/log/$app" ]]; then
+    mkdir -p "/var/log/$app" || {
+        ynh_die "Failed to create log directory /var/log/$app"
+    }
+fi
+
+chown "$app:$app" "/var/log/$app" || {
+    ynh_die "Failed to set ownership on /var/log/$app"
+}
+
+chmod 750 "/var/log/$app" || {
+    ynh_die "Failed to set permissions on /var/log/$app"
+}
+
+ynh_print_info "Log directory ready at /var/log/$app"
 
 #=================================================
-# RUN INSTALL-CLI.SH
+# STEP 3: ENSURE DATA DIRECTORY EXISTS
 #=================================================
 
-ynh_script_progression "Installing OpenClaw..."
+ynh_script_progression "Ensuring data directory exists..."
+
+if [[ ! -d "$data_dir" ]]; then
+    mkdir -p "$data_dir" || {
+        ynh_die "Failed to create data directory $data_dir"
+    }
+fi
+
+chown -R "$app:$app" "$data_dir" || {
+    ynh_die "Failed to set ownership on $data_dir"
+}
+
+chmod 755 "$data_dir" || {
+    ynh_die "Failed to set permissions on $data_dir"
+}
+
+ynh_print_info "Data directory ready at $data_dir"
+
+#=================================================
+# STEP 4: VERIFY INSTALL CLI URL IS REACHABLE
+#=================================================
+
+ynh_script_progression "Verifying installer download source..."
+
+if ! curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+    -o /dev/null "$INSTALL_CLI_URL" 2>/dev/null; then
+    ynh_die "Cannot reach $INSTALL_CLI_URL. Check network connectivity and DNS resolution."
+fi
+
+ynh_print_info "Installer URL is reachable"
+
+#=================================================
+# STEP 5: DOWNLOAD AND VERIFY INSTALL-CLI.SH
+#=================================================
+
+ynh_script_progression "Downloading OpenClaw installer..."
+
+localInstaller="/tmp/openclaw_install_cli_$$.sh"
 
 download_verified \
     "$INSTALL_CLI_URL" \
-    "/tmp/openclaw_install_cli_$$.sh" \
+    "$localInstaller" \
     "$INSTALL_CLI_SHA256"
-chmod +x "/tmp/openclaw_install_cli_$$.sh"
 
-run_as_openclaw bash "/tmp/openclaw_install_cli_$$.sh" \
+if [[ ! -s "$localInstaller" ]]; then
+    ynh_die "Downloaded installer is empty or missing"
+fi
+
+if [[ ! -r "$localInstaller" ]]; then
+    ynh_die "Downloaded installer is not readable"
+fi
+
+chmod +x "$localInstaller" || {
+    ynh_die "Failed to make installer executable"
+}
+
+ynh_print_info "Installer downloaded and verified (SHA256: ${INSTALL_CLI_SHA256:0:16}...)"
+
+#=================================================
+# STEP 6: RUN INSTALL-CLI.SH AS APP USER
+#=================================================
+
+ynh_script_progression "Running OpenClaw installer as user '$app'..."
+
+local install_log="/var/log/$app/install.log"
+
+{
+    echo "========================================"
+    echo "OpenClaw Installation Log"
+    echo "Timestamp: $(date -Iseconds)"
+    echo "User: $app"
+    echo "Version: $openclaw_version"
+    echo "Channel: $update_channel"
+    echo "Data dir: $data_dir"
+    echo "========================================"
+} >> "$install_log"
+
+run_as_openclaw bash "$localInstaller" \
     --no-onboard \
     --install-method npm \
     --version "$openclaw_version" \
     --prefix "/home/$app/.openclaw" \
     --set-npm-prefix \
-    --json 2>&1 | tee -a "/var/log/$app/install.log"
+    --json 2>&1 \
+    | tee -a "$install_log"
 
-rm -f "/tmp/openclaw_install_cli_$$.sh"
+local install_exit_status=${PIPESTATUS[0]}
+
+rm -f "$localInstaller"
+
+if [[ $install_exit_status -ne 0 ]]; then
+    ynh_die "OpenClaw installer failed with exit code $install_exit_status. Check $install_log for details."
+fi
+
+ynh_print_info "OpenClaw installer completed successfully"
 
 #=================================================
-# WRITE OPENCLAW.JSON
+# STEP 7: VERIFY OPENCLAW BINARY WAS INSTALLED
 #=================================================
 
-ynh_script_progression "Configuring OpenClaw gateway..."
+ynh_script_progression "Verifying OpenClaw installation..."
 
-export OPENCLAW_BIN="$(openclaw_bin)"
-export OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+OPENCLAW_BIN="$(openclaw_bin)"
+OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+
+export OPENCLAW_BIN
+export OPENCLAW_STATE_DIR
+
+if [[ ! -x "$OPENCLAW_BIN" ]]; then
+    ynh_die "OpenClaw binary not found at $OPENCLAW_BIN after installation"
+fi
+
+if [[ ! -d "$OPENCLAW_STATE_DIR" ]]; then
+    ynh_die "OpenClaw state directory not found at $OPENCLAW_STATE_DIR after installation"
+fi
+
+local openclaw_version_installed
+openclaw_version_installed="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || {
+    ynh_die "Failed to run '$OPENCLAW_BIN --version'. Binary may be corrupted."
+}
+
+ynh_print_info "OpenClaw version installed: $openclaw_version_installed"
+
+#=================================================
+# STEP 8: WRITE OPENCLAW.JSON CONFIGURATION
+#=================================================
+
+ynh_script_progression "Writing OpenClaw gateway configuration..."
+
+if [[ -f "$data_dir/openclaw.json" ]]; then
+    ynh_print_info "Backing up existing openclaw.json..."
+    cp "$data_dir/openclaw.json" "$data_dir/openclaw.json.bak.$(date +%Y%m%d%H%M%S)"
+fi
 
 ynh_config_add --template="openclaw.json" --destination="$data_dir/openclaw.json"
 
+if [[ ! -f "$data_dir/openclaw.json" ]]; then
+    ynh_die "Failed to create $data_dir/openclaw.json"
+fi
+
+chown "$app:$app" "$data_dir/openclaw.json" || {
+    ynh_die "Failed to set ownership on $data_dir/openclaw.json"
+fi
+
+chmod 600 "$data_dir/openclaw.json" || {
+    ynh_die "Failed to set permissions on $data_dir/openclaw.json"
+}
+
+ynh_print_info "Gateway configuration written to $data_dir/openclaw.json"
+
 #=================================================
-# CONFIGURE PATH DROP-IN
+# STEP 9: CREATE PATH DROP-IN FOR CLI ACCESS
 #=================================================
 
-cat > "/etc/profile.d/openclaw_${app}.sh" << EOF
+ynh_script_progression "Creating PATH drop-in for CLI access..."
+
+local profile_dropin="/etc/profile.d/openclaw_${app}.sh"
+
+cat > "$profile_dropin" << EOF
+# OpenClaw CLI PATH - managed by YunoHost package
+# Do not edit manually; changes will be overwritten on upgrade
 export PATH="/home/$app/.openclaw/bin:\$PATH"
+export OPENCLAW_STATE_DIR="/home/$app/.openclaw"
 EOF
-chmod +x "/etc/profile.d/openclaw_${app}.sh"
+
+chmod +x "$profile_dropin" || {
+    ynh_die "Failed to make profile drop-in executable"
+}
+
+ynh_print_info "PATH drop-in created at $profile_dropin"
 
 #=================================================
-# INSTALL SYSTEMD UNIT
+# STEP 10: INSTALL SYSTEMD SERVICE UNIT
 #=================================================
+
+ynh_script_progression "Installing systemd service unit..."
 
 ynh_config_add_systemd
 
+if [[ ! -f "/etc/systemd/system/${app}.service" ]]; then
+    ynh_die "Failed to install systemd service unit"
+fi
+
+systemctl daemon-reload || {
+    ynh_print_warn "Failed to reload systemd daemon"
+}
+
+ynh_print_info "Systemd service unit installed"
+
 #=================================================
-# ENABLE LINGERING
+# STEP 11: ENABLE LINGERING FOR BACKGROUND SERVICE
 #=================================================
 
-loginctl enable-linger "$app" 2>/dev/null || true
+ynh_script_progression "Enabling lingering for user '$app'..."
+
+if loginctl enable-linger "$app" 2>/dev/null; then
+    ynh_print_info "Lingering enabled for user $app"
+else
+    ynh_print_warn "Failed to enable lingering (may already be enabled or not permitted)"
+fi
 
 #=================================================
-# CONFIGURE NGINX
+# STEP 12: CONFIGURE NGINX REVERSE PROXY
 #=================================================
+
+ynh_script_progression "Configuring NGINX reverse proxy..."
 
 ynh_config_add_nginx
 
+if [[ ! -f "/etc/nginx/conf.d/${domain}.d/${app}.conf" ]]; then
+    ynh_die "Failed to install NGINX configuration"
+fi
+
+if ! nginx -t 2>/dev/null; then
+    ynh_print_warn "NGINX configuration test failed; attempting reload anyway"
+fi
+
+ynh_print_info "NGINX reverse proxy configured"
+
 #=================================================
-# SET PERMISSIONS
+# STEP 13: SET PERMISSIONS AND REGISTER SERVICE
 #=================================================
 
-yunohost app addaccess --users all "$app"
+ynh_script_progression "Configuring YunoHost permissions..."
+
+yunohost app addaccess --users all "$app" || {
+    ynh_die "Failed to set application access permissions"
+}
+
+ynh_print_info "Application permissions configured"
 
 #=================================================
-# REGISTER SERVICE
+# STEP 14: REGISTER SERVICE WITH YUNOHOST
 #=================================================
+
+ynh_script_progression "Registering service with YunoHost..."
 
 yunohost service add "$app" \
     --description="OpenClaw AI Gateway" \
     --log="/var/log/$app/$app.log" \
-    --test_status="curl -fsS http://127.0.0.1:${port}/readyz"
+    --test_status="curl -fsS http://127.0.0.1:${port}/readyz" \
+    || {
+        ynh_die "Failed to register service with YunoHost"
+    }
+
+ynh_print_info "Service registered with YunoHost"
 
 #=================================================
-# CONFIGURE FAIL2BAN
+# STEP 15: CONFIGURE FAIL2BAN JAIL
 #=================================================
+
+ynh_script_progression "Configuring Fail2Ban protection..."
 
 ynh_config_add_fail2ban --logpath="/var/log/$app/error.log" \
-    --failregex=".*\[openclaw\].*auth.*failed.*from <HOST>.*|.*\[openclaw\].*invalid token.*from <HOST>.*|.*\[openclaw\].*unauthorized.*<HOST>.*"
+    --failregex=".*\[openclaw\].*auth.*failed.*from <HOST>.*|.*\[openclaw\].*invalid token.*from <HOST>.*|.*\[openclaw\].*unauthorized.*<HOST>.*" \
+    || {
+        ynh_print_warn "Failed to configure Fail2Ban; continuing without it"
+    }
+
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    systemctl reload fail2ban 2>/dev/null || true
+    ynh_print_info "Fail2Ban configured and reloaded"
+else
+    ynh_print_warn "Fail2Ban is not running; jail will be activated on next start"
+fi
 
 #=================================================
-# START SERVICE
+# STEP 16: CREATE COMPILE CACHE DIRECTORY
 #=================================================
 
-ynh_script_progression "Starting OpenClaw gateway..."
+ynh_script_progression "Creating Node.js compile cache directory..."
 
-ynh_systemctl --service="$app" --action="start"
+local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+mkdir -p "$compile_cache" || {
+    ynh_print_warn "Failed to create compile cache directory at $compile_cache"
+}
+chown "$app:$app" "$compile_cache" || {
+    ynh_print_warn "Failed to set ownership on compile cache directory"
+}
 
-wait_for_gateway "$port"
+ynh_print_info "Compile cache directory ready at $compile_cache"
 
 #=================================================
-# POST-INSTALL DOCTOR
+# STEP 17: START SYSTEMD SERVICE
+#=================================================
+
+ynh_script_progression "Starting OpenClaw gateway service..."
+
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    ynh_print_info "Service is already running; restarting..."
+    ynh_systemctl --service="$app" --action="restart"
+else
+    ynh_systemctl --service="$app" --action="start"
+fi
+
+if ! wait_for_gateway_with_retry "$port" 45; then
+    ynh_die "Gateway failed to become ready within 90 seconds. Check logs at /var/log/$app/error.log"
+fi
+
+ynh_print_info "Gateway is running and responding on port $port"
+
+#=================================================
+# STEP 18: RUN POST-INSTALL DOCTOR CHECK
 #=================================================
 
 ynh_script_progression "Running post-install health check..."
 
-run_as_openclaw "$OPENCLAW_BIN" doctor --non-interactive 2>&1 | tee -a "/var/log/$app/install.log"
+{
+    echo ""
+    echo "========================================"
+    echo "OpenClaw Doctor Output"
+    echo "Timestamp: $(date -Iseconds)"
+    echo "========================================"
+} >> "$install_log"
+
+run_as_openclaw "$OPENCLAW_BIN" doctor --non-interactive 2>&1 \
+    | tee -a "$install_log" || {
+        ynh_print_warn "OpenClaw doctor reported issues; review $install_log"
+    }
 
 #=================================================
-# END OF SCRIPT
+# STEP 19: FINAL PERMISSION VERIFICATION
 #=================================================
 
-ynh_script_progression "Installation of $app completed"
+ynh_script_progression "Verifying final permissions..."
+
+chown -R "$app:$app" "$data_dir" || {
+    ynh_print_warn "Failed to recursively set ownership on $data_dir"
+}
+
+chown -R "$app:$app" "/var/log/$app" || {
+    ynh_print_warn "Failed to recursively set ownership on /var/log/$app"
+}
+
+ynh_print_info "Final permissions verified"
+
+#=================================================
+# INSTALLATION COMPLETE
+#=================================================
+
+{
+    echo ""
+    echo "========================================"
+    echo "Installation completed successfully"
+    echo "Timestamp: $(date -Iseconds)"
+    echo "========================================"
+} >> "$install_log"
+
+ynh_script_progression "Installation of $app completed successfully!"
+ynh_print_info "Gateway URL: https://${domain}${path}"
+ynh_print_info "Gateway port: $port"
+ynh_print_info "Gateway auth token: <stored in $data_dir/openclaw.json>"
+ynh_print_info "Logs: /var/log/$app/"
+ynh_print_info ""
+ynh_print_info "Run 'sudo -u $app openclaw gateway' for CLI access."
+
+exit 0

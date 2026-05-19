@@ -1,6 +1,27 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE UPGRADE SCRIPT
+#=================================================
+# Implements the flow defined in AGENTS.md §6.2
+#
+# This script is idempotent and handles partial failures.
+# It will re-render configs and attempt recovery even if
+# the update itself fails, falling back to install-cli.sh.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: Abort if not running as root
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
@@ -8,15 +29,66 @@ source _common.sh
 source /usr/share/yunohost/helpers
 
 #=================================================
-# STOP SYSTEMD SERVICE
+# TRAP: CLEANUP ON ERROR
+#=================================================
+
+on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        ynh_print_err "Upgrade failed with exit code $exit_code"
+        ynh_print_err "Check logs at /var/log/$app/upgrade.log"
+    fi
+}
+
+trap on_error ERR
+
+#=================================================
+# STEP 0: GUARD: CHECK IF INSTALLED
+#=================================================
+
+OPENCLAW_BIN="$(openclaw_bin)"
+OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+
+export OPENCLAW_BIN
+export OPENCLAW_STATE_DIR
+
+if [[ ! -x "$OPENCLAW_BIN" ]]; then
+    ynh_die "OpenClaw binary not found at $OPENCLAW_BIN. Run install first: yunohost app install $app"
+fi
+
+if [[ ! -d "$OPENCLAW_STATE_DIR" ]]; then
+    ynh_die "OpenClaw state directory not found at $OPENCLAW_STATE_DIR. Run install first."
+fi
+
+if [[ ! -f "$data_dir/openclaw.json" ]]; then
+    ynh_die "OpenClaw configuration not found at $data_dir/openclaw.json. Run install first."
+fi
+
+local current_version
+current_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || current_version="unknown"
+ynh_print_info "Current OpenClaw version: $current_version"
+
+#=================================================
+# STEP 1: STOP SYSTEMD SERVICE
 #=================================================
 
 ynh_script_progression "Stopping $app's systemd service..."
 
-ynh_systemctl --service="$app" --action="stop"
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    ynh_systemctl --service="$app" --action="stop"
+    sleep 2
+else
+    ynh_print_info "Service is not running; no need to stop"
+fi
+
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    ynh_die "Failed to stop service. Cannot proceed with upgrade."
+fi
+
+ynh_print_info "Service stopped"
 
 #=================================================
-# ENSURE DOWNWARD COMPATIBILITY
+# STEP 2: ENSURE DOWNWARD COMPATIBILITY
 #=================================================
 
 ynh_script_progression "Ensuring downward compatibility..."
@@ -28,72 +100,282 @@ if ynh_compare_current_package_version --comparison lt --version "2.0~ynh1"; the
     ynh_upgrade_from_v1_to_v2
 fi
 
+ynh_print_info "Downward compatibility checks completed"
+
 #=================================================
-# RE-RENDER ALL CONFIG FILES
+# STEP 3: BACKUP CURRENT CONFIG
+#=================================================
+
+ynh_script_progression "Backing up current configuration..."
+
+if [[ -f "$data_dir/openclaw.json" ]]; then
+    local backup_ts
+    backup_ts="$(date +%Y%m%d%H%M%S)"
+    cp "$data_dir/openclaw.json" "$data_dir/openclaw.json.pre-upgrade.${backup_ts}" || {
+        ynh_print_warn "Failed to backup current configuration"
+    }
+    ynh_print_info "Configuration backed up"
+fi
+
+#=================================================
+# STEP 4: RE-RENDER ALL CONFIG FILES
 #=================================================
 
 ynh_script_progression "Re-rendering configuration files..."
 
-export OPENCLAW_BIN="$(openclaw_bin)"
-export OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+update_channel="$(ynh_app_setting_get --key=update_channel)" || update_channel="stable"
+auto_update="$(ynh_app_setting_get --key=auto_update)" || auto_update="0"
+gateway_auth_token="$(jq -r '.gateway.auth.token // empty' "$data_dir/openclaw.json" 2>/dev/null)" || gateway_auth_token=""
 
-ynh_config_add --template="openclaw.json" --destination="$data_dir/openclaw.json"
-ynh_config_add_systemd
-ynh_config_add_nginx
-ynh_config_add_logrotate
+export update_channel
+export auto_update
+export gateway_auth_token
+
+ynh_config_add --template="openclaw.json" --destination="$data_dir/openclaw.json" \
+    || ynh_print_warn "Failed to re-render openclaw.json"
+
+ynh_config_add_systemd \
+    || ynh_print_warn "Failed to re-render systemd service"
+
+ynh_config_add_nginx \
+    || ynh_print_warn "Failed to re-render NGINX config"
+
+ynh_config_add_logrotate \
+    || ynh_print_warn "Failed to re-render logrotate config"
+
 ynh_config_add_fail2ban --logpath="/var/log/$app/error.log" \
-    --failregex=".*\[openclaw\].*auth.*failed.*from <HOST>.*|.*\[openclaw\].*invalid token.*from <HOST>.*|.*\[openclaw\].*unauthorized.*<HOST>.*"
+    --failregex=".*\[openclaw\].*auth.*failed.*from <HOST>.*|.*\[openclaw\].*invalid token.*from <HOST>.*|.*\[openclaw\].*unauthorized.*<HOST>.*" \
+    || ynh_print_warn "Failed to re-render Fail2Ban config"
+
+systemctl daemon-reload 2>/dev/null || {
+    ynh_print_warn "Failed to reload systemd daemon"
+}
+
+ynh_print_info "Configuration files re-rendered"
 
 #=================================================
-# UPDATE OPENCLAW
+# STEP 5: ENSURE LOG DIRECTORY EXISTS
+#=================================================
+
+ynh_script_progression "Ensuring log directory exists..."
+
+if [[ ! -d "/var/log/$app" ]]; then
+    mkdir -p "/var/log/$app" || {
+        ynh_print_warn "Failed to create log directory"
+    }
+fi
+
+chown "$app:$app" "/var/log/$app" 2>/dev/null || {
+    ynh_print_warn "Failed to set log directory ownership"
+}
+
+local upgrade_log="/var/log/$app/upgrade.log"
+
+{
+    echo "========================================"
+    echo "OpenClaw Upgrade Log"
+    echo "Timestamp: $(date -Iseconds)"
+    echo "Previous version: $current_version"
+    echo "Update channel: $update_channel"
+    echo "========================================"
+} >> "$upgrade_log"
+
+#=================================================
+# STEP 6: UPDATE OPENCLAW
 #=================================================
 
 ynh_script_progression "Updating OpenClaw..."
 
-update_channel="$(ynh_app_setting_get --key=update_channel)"
-auto_update="$(ynh_app_setting_get --key=auto_update)"
+local update_success=false
 
 if run_as_openclaw "$OPENCLAW_BIN" update \
-        --channel "$update_channel" --yes --non-interactive --json; then
+        --channel "$update_channel" --yes --non-interactive --json 2>&1 \
+        | tee -a "$upgrade_log"; then
+    update_success=true
     ynh_print_info "OpenClaw updated successfully via openclaw update"
 else
-    ynh_print_warn "openclaw update failed; falling back to install-cli.sh"
-    download_verified "$INSTALL_CLI_URL" /tmp/openclaw_install_$$.sh "$INSTALL_CLI_SHA256"
-    run_as_openclaw bash /tmp/openclaw_install_$$.sh \
-        --install-method npm --no-onboard --json 2>&1 | tee -a "/var/log/$app/upgrade.log"
-    rm -f /tmp/openclaw_install_$$.sh
+    ynh_print_warn "openclaw update command failed; falling back to install-cli.sh method"
+
+    local installer_tmp="/tmp/openclaw_install_upgrade_$$.sh"
+
+    if download_verified "$INSTALL_CLI_URL" "$installer_tmp" "$INSTALL_CLI_SHA256"; then
+        chmod +x "$installer_tmp" || {
+            ynh_print_warn "Failed to make installer executable"
+            rm -f "$installer_tmp"
+        }
+
+        if [[ -x "$installer_tmp" ]]; then
+            run_as_openclaw bash "$installer_tmp" \
+                --no-onboard \
+                --install-method npm \
+                --version "latest" \
+                --prefix "/home/$app/.openclaw" \
+                --set-npm-prefix \
+                --json 2>&1 | tee -a "$upgrade_log"
+
+            local installer_exit=${PIPESTATUS[0]}
+            rm -f "$installer_tmp"
+
+            if [[ $installer_exit -eq 0 ]]; then
+                update_success=true
+                ynh_print_info "OpenClaw updated via install-cli.sh fallback"
+            else
+                ynh_print_warn "install-cli.sh fallback also failed with exit code $installer_exit"
+            fi
+        fi
+    else
+        ynh_print_warn "Failed to download install-cli.sh for fallback update"
+    fi
+fi
+
+if [[ "$update_success" == "false" ]]; then
+    ynh_print_warn "OpenClaw update may have failed; continuing with configuration restore"
 fi
 
 #=================================================
-# RUN DOCTOR FIX
+# STEP 7: RESTORE CONFIG IF UPDATE CORRUPTED IT
+#=================================================
+
+if [[ -f "$data_dir/openclaw.json.pre-upgrade."* ]]; then
+    if [[ ! -f "$data_dir/openclaw.json" ]] || [[ ! -s "$data_dir/openclaw.json" ]]; then
+        ynh_print_warn "Config appears corrupted after update; restoring from backup"
+        local latest_backup
+        latest_backup="$(ls -t "$data_dir"/openclaw.json.pre-upgrade.* 2>/dev/null | head -1)"
+        if [[ -n "$latest_backup" ]] && [[ -f "$latest_backup" ]]; then
+            cp "$latest_backup" "$data_dir/openclaw.json" || {
+                ynh_print_err "Failed to restore config from backup"
+            }
+        fi
+    fi
+fi
+
+#=================================================
+# STEP 8: RUN DOCTOR FIX
 #=================================================
 
 ynh_script_progression "Running OpenClaw doctor..."
 
-run_as_openclaw "$OPENCLAW_BIN" doctor --fix --non-interactive 2>&1 \
-    | tee -a "/var/log/$app/upgrade.log"
+if [[ -x "$OPENCLAW_BIN" ]]; then
+    {
+        echo ""
+        echo "========================================"
+        echo "OpenClaw Doctor Output"
+        echo "Timestamp: $(date -Iseconds)"
+        echo "========================================"
+    } >> "$upgrade_log"
+
+    run_as_openclaw "$OPENCLAW_BIN" doctor --fix --non-interactive 2>&1 \
+        | tee -a "$upgrade_log" || {
+            ynh_print_warn "OpenClaw doctor reported issues; review $upgrade_log"
+        }
+else
+    ynh_print_warn "OpenClaw binary not found; skipping doctor check"
+fi
 
 #=================================================
-# RE-REGISTER SERVICE
+# STEP 9: ENSURE PERMISSIONS
 #=================================================
+
+ynh_script_progression "Ensuring correct permissions..."
+
+if [[ -d "$data_dir" ]]; then
+    chown -R "$app:$app" "$data_dir" || {
+        ynh_print_warn "Failed to set ownership on $data_dir"
+    }
+fi
+
+if [[ -d "/var/log/$app" ]]; then
+    chown -R "$app:$app" "/var/log/$app" || {
+        ynh_print_warn "Failed to set ownership on /var/log/$app"
+    }
+fi
+
+# Ensure compile cache directory exists
+local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+if [[ ! -d "$compile_cache" ]]; then
+    mkdir -p "$compile_cache" || {
+        ynh_print_warn "Failed to create compile cache directory"
+    }
+    chown "$app:$app" "$compile_cache" 2>/dev/null || {
+        ynh_print_warn "Failed to set compile cache ownership"
+    }
+fi
+
+ynh_print_info "Permissions verified"
+
+#=================================================
+# STEP 10: RE-REGISTER SERVICE WITH YUNOHOST
+#=================================================
+
+ynh_script_progression "Re-registering service with YunoHost..."
 
 yunohost service add "$app" \
     --description="OpenClaw AI Gateway" \
     --log="/var/log/$app/$app.log" \
-    --test_status="curl -fsS http://127.0.0.1:${port}/readyz"
+    --test_status="curl -fsS http://127.0.0.1:${port}/readyz" \
+    || {
+        ynh_print_warn "Failed to re-register service; may already be registered"
+    }
+
+ynh_print_info "Service registered"
 
 #=================================================
-# START SYSTEMD SERVICE
+# STEP 11: RELOAD FAIL2BAN
+#=================================================
+
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    ynh_script_progression "Reloading Fail2Ban..."
+
+    systemctl reload fail2ban 2>/dev/null || {
+        ynh_print_warn "Failed to reload Fail2Ban"
+    }
+
+    ynh_print_info "Fail2Ban reloaded"
+else
+    ynh_print_info "Fail2Ban is not active; skipping reload"
+fi
+
+#=================================================
+# STEP 12: START SYSTEMD SERVICE
 #=================================================
 
 ynh_script_progression "Starting $app's systemd service..."
 
-ynh_systemctl --service="$app" --action="start"
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    ynh_print_info "Service is already running; restarting..."
+    ynh_systemctl --service="$app" --action="restart"
+else
+    ynh_systemctl --service="$app" --action="start"
+fi
 
-wait_for_gateway "$port"
+if ! wait_for_gateway_with_retry "$port" 60; then
+    ynh_print_warn "Gateway failed to become ready within 60 seconds"
+    ynh_print_warn "Check logs at /var/log/$app/error.log for details"
+fi
+
+ynh_print_info "Gateway service started"
 
 #=================================================
-# END OF SCRIPT
+# STEP 13: VERIFY NEW VERSION
 #=================================================
 
-ynh_script_progression "Upgrade of $app completed"
+ynh_script_progression "Verifying upgrade..."
+
+local new_version
+new_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || new_version="unknown"
+
+{
+    echo ""
+    echo "========================================"
+    echo "Upgrade Summary"
+    echo "Timestamp: $(date -Iseconds)"
+    echo "Previous version: $current_version"
+    echo "New version: $new_version"
+    echo "========================================"
+} >> "$upgrade_log"
+
+ynh_print_info "Upgrade completed"
+ynh_print_info "Previous version: $current_version"
+ynh_print_info "New version: $new_version"
+
+exit 0
