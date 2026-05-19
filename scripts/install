@@ -34,8 +34,8 @@ source /usr/share/yunohost/helpers
 on_error() {
     local exit_code=$?
     if [[ $exit_code -ne 0 ]]; then
-        ynh_print_err "Installation failed with exit code $exit_code"
-        ynh_print_err "Check logs at /var/log/$app/install.log"
+        ynh_print_warn "Installation failed with exit code $exit_code"
+        ynh_print_warn "Check logs at /var/log/$app/install.log"
     fi
 }
 
