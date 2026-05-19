@@ -1,0 +1,61 @@
+#!/bin/bash
+
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+#=================================================
+# STOP SYSTEMD SERVICE
+#=================================================
+
+ynh_script_progression "Stopping $app's systemd service..."
+
+ynh_systemctl --service="$app" --action="stop"
+
+#=================================================
+# RUN OPENCLAW UNINSTALLER
+#=================================================
+
+if [[ -x "$(openclaw_bin)" ]]; then
+    ynh_script_progression "Running OpenClaw uninstaller..."
+    run_as_openclaw "$(openclaw_bin)" uninstall --all --yes --non-interactive 2>/dev/null || true
+fi
+
+#=================================================
+# DISABLE LINGERING
+#=================================================
+
+loginctl disable-linger "$app" 2>/dev/null || true
+
+#=================================================
+# REMOVE PROFILE DROP-IN
+#=================================================
+
+ynh_safe_rm "/etc/profile.d/openclaw_${app}.sh"
+
+#=================================================
+# REMOVE SYSTEM CONFIGURATION
+#=================================================
+
+ynh_script_progression "Removing system configurations related to $app..."
+
+ynh_config_remove_fail2ban
+
+ynh_config_remove_logrotate
+
+if yunohost service status "$app" >/dev/null 2>&1; then
+    yunohost service remove "$app"
+fi
+
+ynh_config_remove_systemd
+
+ynh_config_remove_nginx
+
+#=================================================
+# END OF SCRIPT
+#=================================================
+
+ynh_script_progression "Removal of $app completed"

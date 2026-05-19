@@ -1,0 +1,13 @@
+/var/log/__APP__/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 __APP__ www-data
+    sharedscripts
+    postrotate
+        systemctl kill -s USR1 __APP__.service 2>/dev/null || true
+    endscript
+}

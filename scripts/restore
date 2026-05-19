@@ -1,0 +1,84 @@
+#!/bin/bash
+
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+#=================================================
+# RESTORE THE APP MAIN DIR
+#=================================================
+
+ynh_script_progression "Restoring the app main directory..."
+
+ynh_restore "$install_dir"
+chown -R "$app:www-data" "$install_dir"
+
+#=================================================
+# RESTORE THE DATA DIRECTORY
+#=================================================
+
+ynh_script_progression "Restoring the data directory..."
+
+ynh_restore "$data_dir"
+chown -R "$app:$app" "$data_dir"
+
+#=================================================
+# RESTORE SYSTEM CONFIGURATION
+#=================================================
+
+ynh_script_progression "Restoring system configurations related to $app..."
+
+ynh_restore "/etc/nginx/conf.d/$domain.d/$app.conf"
+
+ynh_restore "/etc/systemd/system/$app.service"
+systemctl enable "$app.service" --quiet
+
+yunohost service add "$app" \
+    --description="OpenClaw AI Gateway" \
+    --log="/var/log/$app/$app.log" \
+    --test_status="curl -fsS http://127.0.0.1:${port}/readyz"
+
+ynh_restore "/etc/logrotate.d/$app"
+
+ynh_restore "/etc/fail2ban/jail.d/$app.conf"
+ynh_restore "/etc/fail2ban/filter.d/$app.conf"
+
+ynh_restore "/etc/profile.d/openclaw_${app}.sh"
+chmod +x "/etc/profile.d/openclaw_${app}.sh"
+
+#=================================================
+# ENABLE LINGERING
+#=================================================
+
+loginctl enable-linger "$app" 2>/dev/null || true
+
+#=================================================
+# RELOAD AND START SERVICES
+#=================================================
+
+ynh_script_progression "Reloading services and starting $app..."
+
+ynh_systemctl --service="fail2ban" --action="reload"
+ynh_systemctl --service="nginx" --action="reload"
+ynh_systemctl --service="$app" --action="start"
+
+#=================================================
+# RUN DOCTOR
+#=================================================
+
+if [[ -x "$(openclaw_bin)" ]]; then
+    ynh_script_progression "Validating restored state..."
+    export OPENCLAW_BIN="$(openclaw_bin)"
+    export OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+    run_as_openclaw "$OPENCLAW_BIN" doctor --non-interactive 2>&1 \
+        | tee -a "/var/log/$app/restore.log"
+fi
+
+#=================================================
+# END OF SCRIPT
+#=================================================
+
+ynh_script_progression "Restoration completed for $app"

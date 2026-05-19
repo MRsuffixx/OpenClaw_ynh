@@ -1,0 +1,99 @@
+#:schema https://raw.githubusercontent.com/YunoHost/apps/main/schemas/manifest.v2.schema.json
+
+packaging_format = 2
+id = "openclaw"
+name = "OpenClaw"
+description.en = "Self-hosted AI gateway and agentic runtime with multi-channel messaging support"
+description.fr = "Passerelle IA auto-hébergée avec support multi-canaux et agents autonomes"
+
+version = "1.0~ynh1"
+
+maintainers = ["MRsuffixx"]
+
+[upstream]
+license = "AGPL-3.0"
+website = "https://openclaw.ai"
+admindoc = "https://docs.openclaw.ai"
+userdoc = "https://docs.openclaw.ai"
+code = "https://github.com/openclaw/openclaw"
+
+[integration]
+yunohost = ">= 11.2"
+helpers_version = "2.1"
+architectures = ["amd64", "arm64"]
+multi_instance = true
+ldap = "not_relevant"
+sso = true
+disk = "1G"
+ram.build = "512M"
+ram.runtime = "256M"
+
+[install]
+
+  [install.domain]
+  type = "domain"
+
+  [install.path]
+  type = "path"
+  default = "/"
+
+  [install.init_main_permission]
+  type = "group"
+  default = "admins"
+
+  [install.openclaw_version]
+  ask.en = "OpenClaw version to install (leave 'latest' for stable release)"
+  type = "string"
+  default = "latest"
+
+  [install.update_channel]
+  ask.en = "Update channel"
+  type = "select"
+  choices = ["stable", "beta", "dev"]
+  default = "stable"
+
+  [install.gateway_auth_token]
+  ask.en = "Gateway auth token (leave empty to auto-generate)"
+  type = "string"
+  default = ""
+  optional = true
+
+  [install.auto_update]
+  ask.en = "Enable automatic updates?"
+  type = "boolean"
+  default = false
+
+[resources]
+
+  [resources.sources.main]
+  autoupdate.strategy = "none"
+
+  [resources.system_user]
+  home_dir = "/home/__APP__"
+  allow_email = false
+
+  [resources.install_dir]
+  dir = "/opt/yunohost/__APP__"
+  owner = "__APP__:__APP__"
+  group = "www-data:r-x"
+
+  [resources.data_dir]
+  dir = "/home/__APP__/.openclaw"
+  owner = "__APP__:__APP__"
+
+  [resources.ports]
+  main.default = 18789
+
+  [resources.apt]
+  packages = ["git", "curl", "ca-certificates", "build-essential", "python3"]
+
+  [resources.permissions]
+  main.url = "/"
+  main.label = "OpenClaw"
+  main.allowed = "admins"
+  main.auth_header = true
+  api.url = "/api"
+  api.label = "OpenClaw API"
+  api.allowed = "visitors"
+  api.show_tile = false
+  api.protected = true

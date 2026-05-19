@@ -1,0 +1,95 @@
+#!/bin/bash
+
+#=================================================
+# IMPORT GENERIC HELPERS
+#=================================================
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_abort_if_errors
+
+#=================================================
+# RETRIEVE SETTINGS
+#=================================================
+
+data_dir="$(ynh_app_setting_get --key=data_dir)"
+app_version="$(ynh_app_setting_get --key=openclaw_version)"
+
+#=================================================
+# SPECIFIC GETTERS
+#=================================================
+
+get__update_channel() {
+    local channel
+    channel="$(jq -r '.update.channel // "stable"' "$data_dir/openclaw.json" 2>/dev/null)"
+    echo "${channel:-stable}"
+}
+
+set__update_channel() {
+    local value="$1"
+    if [[ "$value" == "dev" ]]; then
+        ynh_die "The 'dev' channel is not supported by this YunoHost package."
+    fi
+    local current
+    current="$(jq -r '.update.channel' "$data_dir/openclaw.json" 2>/dev/null)"
+    if [[ "$current" != "$value" ]]; then
+        jq ".update.channel = \"$value\"" "$data_dir/openclaw.json" > /tmp/openclaw_json_tmp \
+            && mv /tmp/openclaw_json_tmp "$data_dir/openclaw.json"
+    fi
+    ynh_app_setting_set --key=update_channel --value="$value"
+}
+
+get__gateway_auth_token() {
+    local token
+    token="$(jq -r '.gateway.auth.token // empty' "$data_dir/openclaw.json" 2>/dev/null)"
+    if [[ -z "$token" ]]; then
+        echo "YNH_NULL"
+    else
+        echo "$token"
+    fi
+}
+
+set__gateway_auth_token() {
+    local value="$1"
+    local current
+    current="$(jq -r '.gateway.auth.token // empty' "$data_dir/openclaw.json" 2>/dev/null)"
+    if [[ "$current" != "$value" ]]; then
+        jq ".gateway.auth.token = \"$value\"" "$data_dir/openclaw.json" > /tmp/openclaw_json_tmp \
+            && mv /tmp/openclaw_json_tmp "$data_dir/openclaw.json"
+    fi
+    ynh_app_setting_set --key=gateway_auth_token --value="$value"
+    ynh_systemctl --service="$app" --action="restart"
+}
+
+get__openclaw_version() {
+    if [[ -x "$(openclaw_bin)" ]]; then
+        "$(openclaw_bin)" --version 2>/dev/null | head -n1 || echo "unknown"
+    else
+        echo "not installed"
+    fi
+}
+
+get__gateway_status() {
+    if curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+#=================================================
+# SPECIFIC VALIDATORS
+#=================================================
+
+validate__gateway_auth_token() {
+    if [[ ${#gateway_auth_token} -lt 16 ]]; then
+        echo "Token must be at least 16 characters."
+    fi
+}
+
+#=================================================
+# RUN CONFIG PANEL
+#=================================================
+
+ynh_app_config_run "$1"

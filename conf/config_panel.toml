@@ -1,0 +1,37 @@
+#:schema https://github.com/YunoHost/apps/raw/main/schemas/config_panel.v1.schema.json
+
+version = "1.0"
+
+[main]
+name = "OpenClaw Settings"
+
+    [main.gateway]
+    name = "Gateway"
+
+        [main.gateway.update_channel]
+        ask.en = "Update channel"
+        type = "select"
+        choices = ["stable", "beta", "dev"]
+        bind = "yaml:__DATA_DIR__/openclaw.json:update.channel"
+
+        [main.gateway.auto_update]
+        ask.en = "Enable automatic updates"
+        type = "boolean"
+        bind = "yaml:__DATA_DIR__/openclaw.json:update.auto.enabled"
+
+        [main.gateway.gateway_auth_token]
+        ask.en = "Gateway auth token (shared secret for API access)"
+        type = "string"
+        bind = "yaml:__DATA_DIR__/openclaw.json:gateway.auth.token"
+        redact = true
+
+    [main.info]
+    name = "Info (read-only)"
+
+        [main.info.openclaw_version]
+        ask.en = "Installed OpenClaw version"
+        type = "display"
+
+        [main.info.gateway_status]
+        ask.en = "Gateway status"
+        type = "display"

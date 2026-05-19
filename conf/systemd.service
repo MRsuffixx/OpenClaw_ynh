@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenClaw Gateway (__APP__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP__
+Group=__APP__
+WorkingDirectory=/home/__APP__/.openclaw
+Environment=HOME=/home/__APP__
+Environment=OPENCLAW_STATE_DIR=/home/__APP__/.openclaw
+Environment=OPENCLAW_NO_RESPAWN=1
+Environment=NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache-__APP__
+Environment=PATH=/home/__APP__/.openclaw/bin:/home/__APP__/.openclaw/tools/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/bin/mkdir -p /var/tmp/openclaw-compile-cache-__APP__
+ExecStart=/home/__APP__/.openclaw/bin/openclaw gateway --port __PORT__
+ExecStop=/home/__APP__/.openclaw/bin/openclaw gateway stop
+Restart=always
+RestartSec=2
+TimeoutStartSec=90
+TimeoutStopSec=30
+StandardOutput=append:/var/log/__APP__/__APP__.log
+StandardError=append:/var/log/__APP__/error.log
+
+[Install]
+WantedBy=multi-user.target
