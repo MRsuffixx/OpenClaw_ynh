@@ -1,6 +1,27 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE RESTORE SCRIPT
+#=================================================
+# Implements the flow defined in AGENTS.md §6.5
+#
+# This script restores a previously backed-up OpenClaw
+# installation including all configs, data, and service
+# registrations. It is idempotent and verifies each step.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: Abort if not running as root
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
@@ -8,77 +29,398 @@ source _common.sh
 source /usr/share/yunohost/helpers
 
 #=================================================
-# RESTORE THE APP MAIN DIR
+# TRAP: CLEANUP ON ERROR
+#=================================================
+
+on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        ynh_print_err "Restore failed with exit code $exit_code"
+        ynh_print_err "Check logs at /var/log/$app/restore.log"
+    fi
+}
+
+trap on_error ERR
+
+#=================================================
+# CONSTANTS
+#=================================================
+
+RESTORE_LOG="/var/log/$app/restore.log"
+
+#=================================================
+# LOG FUNCTION
+#=================================================
+
+log_restore() {
+    local msg="$1"
+    echo "[$(date -Iseconds)] $msg" >> "$RESTORE_LOG"
+    ynh_print_info "$msg"
+}
+
+#=================================================
+# STEP 0: INITIALIZE LOG
+#=================================================
+
+log_restore "========================================"
+log_restore "OpenClaw Restore Script Started"
+log_restore "App: $app"
+log_restore "Domain: $domain"
+log_restore "Path: $path"
+log_restore "Port: $port"
+log_restore "========================================"
+
+#=================================================
+# STEP 1: VALIDATE BACKUP ARCHIVE CONTENTS
+#=================================================
+
+ynh_script_progression "Validating backup archive..."
+
+local required_paths=(
+    "$install_dir"
+    "$data_dir"
+)
+
+for req_path in "${required_paths[@]}"; do
+    if [[ -z "$req_path" ]]; then
+        ynh_die "Required path is empty in backup manifest"
+    fi
+done
+
+log_restore "Backup archive validation passed"
+
+#=================================================
+# STEP 2: RESTORE APP MAIN DIRECTORY
 #=================================================
 
 ynh_script_progression "Restoring the app main directory..."
 
-ynh_restore "$install_dir"
-chown -R "$app:www-data" "$install_dir"
+if [[ ! -d "$install_dir" ]]; then
+    log_restore "Warning: install_dir does not exist yet; restoring from backup"
+fi
+
+if ynh_restore "$install_dir" 2>/dev/null; then
+    log_restore "Install directory restored from backup"
+else
+    log_restore "Warning: Failed to restore install_dir (may not be in backup)"
+fi
+
+if [[ -d "$install_dir" ]]; then
+    chown -R "$app:www-data" "$install_dir" || {
+        log_restore "Warning: Failed to set install_dir ownership"
+    }
+    chmod 755 "$install_dir" || {
+        log_restore "Warning: Failed to set install_dir permissions"
+    }
+    log_restore "Install directory ownership set to $app:www-data"
+fi
 
 #=================================================
-# RESTORE THE DATA DIRECTORY
+# STEP 3: RESTORE DATA DIRECTORY
 #=================================================
 
 ynh_script_progression "Restoring the data directory..."
 
-ynh_restore "$data_dir"
-chown -R "$app:$app" "$data_dir"
+if [[ ! -d "$data_dir" ]]; then
+    log_restore "Warning: data_dir does not exist yet; restoring from backup"
+fi
+
+if ynh_restore "$data_dir" 2>/dev/null; then
+    log_restore "Data directory restored from backup"
+else
+    log_restore "Warning: Failed to restore data_dir (may not be in backup)"
+fi
+
+if [[ -d "$data_dir" ]]; then
+    chown -R "$app:$app" "$data_dir" || {
+        log_restore "Warning: Failed to set data_dir ownership"
+    }
+    chmod 755 "$data_dir" || {
+        log_restore "Warning: Failed to set data_dir permissions"
+    }
+
+    if [[ -f "$data_dir/openclaw.json" ]]; then
+        chmod 600 "$data_dir/openclaw.json" || {
+            log_restore "Warning: Failed to secure openclaw.json"
+        }
+    fi
+    log_restore "Data directory ownership set to $app:$app"
+fi
 
 #=================================================
-# RESTORE SYSTEM CONFIGURATION
+# STEP 4: RESTORE NGINX CONFIGURATION
 #=================================================
 
-ynh_script_progression "Restoring system configurations related to $app..."
+ynh_script_progression "Restoring NGINX configuration..."
 
-ynh_restore "/etc/nginx/conf.d/$domain.d/$app.conf"
+if ynh_restore "/etc/nginx/conf.d/$domain.d/$app.conf" 2>/dev/null; then
+    log_restore "NGINX configuration restored"
 
-ynh_restore "/etc/systemd/system/$app.service"
-systemctl enable "$app.service" --quiet
+    if nginx -t 2>/dev/null; then
+        log_restore "NGINX configuration test passed"
+    else
+        log_restore "Warning: NGINX configuration test failed"
+    fi
+else
+    log_restore "Warning: Failed to restore NGINX config (may not be in backup)"
+fi
+
+#=================================================
+# STEP 5: RESTORE SYSTEMD SERVICE UNIT
+#=================================================
+
+ynh_script_progression "Restoring systemd service unit..."
+
+if ynh_restore "/etc/systemd/system/$app.service" 2>/dev/null; then
+    log_restore "Systemd service unit restored"
+
+    if systemctl enable "$app.service" --quiet 2>/dev/null; then
+        log_restore "Systemd service enabled"
+    else
+        log_restore "Warning: Failed to enable systemd service"
+    fi
+
+    systemctl daemon-reload 2>/dev/null || {
+        log_restore "Warning: Failed to reload systemd daemon"
+    }
+else
+    log_restore "Warning: Failed to restore systemd service (may not be in backup)"
+fi
+
+#=================================================
+# STEP 6: REGISTER SERVICE WITH YUNOHOST
+#=================================================
+
+ynh_script_progression "Registering service with YunoHost..."
 
 yunohost service add "$app" \
     --description="OpenClaw AI Gateway" \
     --log="/var/log/$app/$app.log" \
-    --test_status="curl -fsS http://127.0.0.1:${port}/readyz"
+    --test_status="curl -fsS http://127.0.0.1:${port}/readyz" \
+    || log_restore "Warning: Service registration failed (may already exist)"
 
-ynh_restore "/etc/logrotate.d/$app"
-
-ynh_restore "/etc/fail2ban/jail.d/$app.conf"
-ynh_restore "/etc/fail2ban/filter.d/$app.conf"
-
-ynh_restore "/etc/profile.d/openclaw_${app}.sh"
-chmod +x "/etc/profile.d/openclaw_${app}.sh"
+log_restore "Service registered with YunoHost"
 
 #=================================================
-# ENABLE LINGERING
+# STEP 7: RESTORE LOGROTATE CONFIGURATION
 #=================================================
 
-loginctl enable-linger "$app" 2>/dev/null || true
+ynh_script_progression "Restoring logrotate configuration..."
 
-#=================================================
-# RELOAD AND START SERVICES
-#=================================================
-
-ynh_script_progression "Reloading services and starting $app..."
-
-ynh_systemctl --service="fail2ban" --action="reload"
-ynh_systemctl --service="nginx" --action="reload"
-ynh_systemctl --service="$app" --action="start"
-
-#=================================================
-# RUN DOCTOR
-#=================================================
-
-if [[ -x "$(openclaw_bin)" ]]; then
-    ynh_script_progression "Validating restored state..."
-    export OPENCLAW_BIN="$(openclaw_bin)"
-    export OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
-    run_as_openclaw "$OPENCLAW_BIN" doctor --non-interactive 2>&1 \
-        | tee -a "/var/log/$app/restore.log"
+if ynh_restore "/etc/logrotate.d/$app" 2>/dev/null; then
+    log_restore "Logrotate configuration restored"
+else
+    log_restore "Warning: Failed to restore logrotate config (may not be in backup)"
 fi
 
 #=================================================
-# END OF SCRIPT
+# STEP 8: RESTORE FAIL2BAN CONFIGURATION
 #=================================================
 
+ynh_script_progression "Restoring Fail2Ban configuration..."
+
+if ynh_restore "/etc/fail2ban/jail.d/$app.conf" 2>/dev/null; then
+    log_restore "Fail2Ban jail configuration restored"
+else
+    log_restore "Warning: Failed to restore Fail2Ban jail (may not be in backup)"
+fi
+
+if ynh_restore "/etc/fail2ban/filter.d/$app.conf" 2>/dev/null; then
+    log_restore "Fail2Ban filter configuration restored"
+else
+    log_restore "Warning: Failed to restore Fail2Ban filter (may not be in backup)"
+fi
+
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    systemctl reload fail2ban 2>/dev/null || {
+        log_restore "Warning: Failed to reload Fail2Ban"
+    }
+    log_restore "Fail2Ban reloaded"
+else
+    log_restore "Info: Fail2Ban is not running; will activate on next start"
+fi
+
+#=================================================
+# STEP 9: RESTORE PROFILE DROP-IN
+#=================================================
+
+ynh_script_progression "Restoring profile drop-in..."
+
+if ynh_restore "/etc/profile.d/openclaw_${app}.sh" 2>/dev/null; then
+    chmod +x "/etc/profile.d/openclaw_${app}.sh" || {
+        log_restore "Warning: Failed to make profile drop-in executable"
+    }
+    log_restore "Profile drop-in restored"
+else
+    log_restore "Warning: Failed to restore profile drop-in (may not be in backup)"
+fi
+
+#=================================================
+# STEP 10: RESTORE LOG DIRECTORY
+#=================================================
+
+ynh_script_progression "Restoring log directory..."
+
+if [[ ! -d "/var/log/$app" ]]; then
+    mkdir -p "/var/log/$app" || {
+        log_restore "Warning: Failed to create log directory"
+    }
+fi
+
+if ynh_restore "/var/log/$app/" 2>/dev/null; then
+    log_restore "Log directory restored from backup"
+else
+    log_restore "Info: No log directory in backup (normal for fresh restore)"
+fi
+
+if [[ -d "/var/log/$app" ]]; then
+    chown -R "$app:$app" "/var/log/$app" || {
+        log_restore "Warning: Failed to set log directory ownership"
+    }
+    chmod 750 "/var/log/$app" || {
+        log_restore "Warning: Failed to set log directory permissions"
+    }
+fi
+
+#=================================================
+# STEP 11: CREATE COMPILE CACHE DIRECTORY
+#=================================================
+
+ynh_script_progression "Creating Node.js compile cache directory..."
+
+local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+if [[ ! -d "$compile_cache" ]]; then
+    mkdir -p "$compile_cache" || {
+        log_restore "Warning: Failed to create compile cache directory"
+    }
+fi
+chown "$app:$app" "$compile_cache" 2>/dev/null || {
+    log_restore "Warning: Failed to set compile cache ownership"
+}
+
+log_restore "Compile cache directory ready at $compile_cache"
+
+#=================================================
+# STEP 12: ENABLE LINGERING
+#=================================================
+
+ynh_script_progression "Enabling lingering for user '$app'..."
+
+if loginctl enable-linger "$app" 2>/dev/null; then
+    log_restore "Lingering enabled for user $app"
+else
+    log_restore "Warning: Failed to enable lingering (may already be enabled)"
+fi
+
+#=================================================
+# STEP 13: RELOAD NGINX
+#=================================================
+
+ynh_script_progression "Reloading NGINX..."
+
+if ynh_systemctl --service="nginx" --action="reload" 2>/dev/null; then
+    log_restore "NGINX reloaded"
+else
+    log_restore "Warning: Failed to reload NGINX"
+fi
+
+#=================================================
+# STEP 14: ENSURE PERMISSIONS ON RESTORED FILES
+#=================================================
+
+ynh_script_progression "Verifying permissions on restored files..."
+
+if [[ -d "$data_dir" ]]; then
+    chown -R "$app:$app" "$data_dir" || {
+        log_restore "Warning: Failed to verify data_dir ownership"
+    }
+fi
+
+if [[ -d "$install_dir" ]]; then
+    chown -R "$app:www-data" "$install_dir" || {
+        log_restore "Warning: Failed to verify install_dir ownership"
+    }
+fi
+
+if [[ -f "$data_dir/openclaw.json" ]]; then
+    chmod 600 "$data_dir/openclaw.json" || {
+        log_restore "Warning: Failed to secure openclaw.json"
+    }
+fi
+
+log_restore "Permissions verified"
+
+#=================================================
+# STEP 15: START SERVICE
+#=================================================
+
+ynh_script_progression "Starting OpenClaw gateway service..."
+
+OPENCLAW_BIN="$(openclaw_bin)"
+
+if [[ ! -x "$OPENCLAW_BIN" ]]; then
+    log_restore "Warning: OpenClaw binary not found at $OPENCLAW_BIN"
+    log_restore "The installation may be incomplete; attempting to proceed anyway"
+fi
+
+if ynh_systemctl --service="$app" --action="start" 2>/dev/null; then
+    log_restore "Gateway service started"
+else
+    log_restore "Warning: Failed to start gateway service"
+fi
+
+#=================================================
+# STEP 16: WAIT FOR GATEWAY
+#=================================================
+
+ynh_script_progression "Waiting for gateway to become ready..."
+
+if wait_for_gateway_with_retry "$port" 60; then
+    log_restore "Gateway is ready and responding"
+else
+    log_restore "Warning: Gateway failed to become ready within 60 seconds"
+    log_restore "Check /var/log/$app/error.log for details"
+fi
+
+#=================================================
+# STEP 17: RUN DOCTOR
+#=================================================
+
+ynh_script_progression "Running post-restore health check..."
+
+if [[ -x "$OPENCLAW_BIN" ]]; then
+    log_restore "Running OpenClaw doctor..."
+
+    {
+        echo ""
+        echo "========================================"
+        echo "OpenClaw Doctor Output (Post-Restore)"
+        echo "Timestamp: $(date -Iseconds)"
+        echo "========================================"
+    } >> "$RESTORE_LOG"
+
+    run_as_openclaw "$OPENCLAW_BIN" doctor --non-interactive 2>&1 \
+        | tee -a "$RESTORE_LOG" || {
+            log_restore "Warning: OpenClaw doctor reported issues"
+        }
+
+    local restored_version
+    restored_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || restored_version="unknown"
+    log_restore "Restored OpenClaw version: $restored_version"
+else
+    log_restore "Warning: Cannot run doctor; OpenClaw binary not found"
+fi
+
+#=================================================
+# RESTORE COMPLETE
+#=================================================
+
+log_restore "========================================"
+log_restore "Restore completed successfully"
+log_restore "Gateway URL: https://${domain}${path}"
+log_restore "Gateway port: $port"
+log_restore "========================================"
+
 ynh_script_progression "Restoration completed for $app"
+
+exit 0

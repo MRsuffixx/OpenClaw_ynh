@@ -1,6 +1,27 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE REMOVE SCRIPT
+#=================================================
+# Implements the flow defined in AGENTS.md §6.3
+#
+# This script removes the OpenClaw installation while
+# preserving data by default. Use --purge to remove data.
+# It cleans up all systemd configs, NGINX, and registrations.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: Abort if not running as root
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
@@ -8,54 +29,256 @@ source _common.sh
 source /usr/share/yunohost/helpers
 
 #=================================================
-# STOP SYSTEMD SERVICE
+# TRAP: CLEANUP ON ERROR
+#=================================================
+
+on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        ynh_print_err "Remove failed with exit code $exit_code"
+    fi
+}
+
+trap on_error ERR
+
+#=================================================
+# CONSTANTS
+#=================================================
+
+REMOVE_LOG="/var/log/$app/remove.log"
+
+#=================================================
+# LOG FUNCTION
+#=================================================
+
+log_remove() {
+    local msg="$1"
+    echo "[$(date -Iseconds)] $msg" >> "$REMOVE_LOG" 2>/dev/null || true
+    ynh_print_info "$msg"
+}
+
+#=================================================
+# INITIALIZE LOG
+#=================================================
+
+if [[ -d "/var/log/$app" ]]; then
+    log_remove "========================================"
+    log_remove "OpenClaw Remove Script Started"
+    log_remove "App: $app"
+    log_remove "User: $(whoami)"
+    log_remove "========================================"
+fi
+
+#=================================================
+# STEP 1: STOP SYSTEMD SERVICE
 #=================================================
 
 ynh_script_progression "Stopping $app's systemd service..."
 
-ynh_systemctl --service="$app" --action="stop"
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    if ynh_systemctl --service="$app" --action="stop" 2>/dev/null; then
+        log_remove "Service stopped"
+    else
+        log_remove "Warning: Failed to stop service cleanly"
+    fi
 
-#=================================================
-# RUN OPENCLAW UNINSTALLER
-#=================================================
+    sleep 1
 
-if [[ -x "$(openclaw_bin)" ]]; then
-    ynh_script_progression "Running OpenClaw uninstaller..."
-    run_as_openclaw "$(openclaw_bin)" uninstall --all --yes --non-interactive 2>/dev/null || true
+    if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+        log_remove "Warning: Service still running after stop; forcing..."
+        systemctl kill -s KILL "${app}.service" 2>/dev/null || true
+    fi
+else
+    log_remove "Service is not running; no need to stop"
 fi
 
 #=================================================
-# DISABLE LINGERING
+# STEP 2: DISABLE SERVICE
 #=================================================
 
-loginctl disable-linger "$app" 2>/dev/null || true
+if systemctl is-enabled --quiet "${app}.service" 2>/dev/null; then
+    systemctl disable "${app}.service" --quiet 2>/dev/null || {
+        log_remove "Warning: Failed to disable service"
+    }
+    log_remove "Service disabled"
+fi
 
 #=================================================
-# REMOVE PROFILE DROP-IN
+# STEP 3: RUN OPENCLAW UNINSTALLER
 #=================================================
 
-ynh_safe_rm "/etc/profile.d/openclaw_${app}.sh"
+OPENCLAW_BIN="$(openclaw_bin)"
+
+if [[ -x "$OPENCLAW_BIN" ]]; then
+    ynh_script_progression "Running OpenClaw uninstaller..."
+
+    log_remove "Running openclaw uninstall --all --yes --non-interactive"
+
+    if run_as_openclaw "$OPENCLAW_BIN" uninstall --all --yes --non-interactive 2>&1 \
+        | tee -a "$REMOVE_LOG" 2>/dev/null; then
+        log_remove "OpenClaw uninstaller completed"
+    else
+        log_remove "Warning: OpenClaw uninstaller returned non-zero (may be normal)"
+    fi
+else
+    log_remove "OpenClaw binary not found at $OPENCLAW_BIN; skipping uninstaller"
+fi
 
 #=================================================
-# REMOVE SYSTEM CONFIGURATION
+# STEP 4: DISABLE LINGERING
 #=================================================
 
-ynh_script_progression "Removing system configurations related to $app..."
+ynh_script_progression "Disabling lingering for user '$app'..."
 
-ynh_config_remove_fail2ban
+if loginctl disable-linger "$app" 2>/dev/null; then
+    log_remove "Lingering disabled for user $app"
+else
+    log_remove "Warning: Failed to disable lingering (may already be disabled or not permitted)"
+fi
 
-ynh_config_remove_logrotate
+#=================================================
+# STEP 5: REMOVE PROFILE DROP-IN
+#=================================================
+
+ynh_script_progression "Removing profile drop-in..."
+
+local profile_dropin="/etc/profile.d/openclaw_${app}.sh"
+if [[ -f "$profile_dropin" ]]; then
+    if ynh_safe_rm "$profile_dropin" 2>/dev/null; then
+        log_remove "Profile drop-in removed"
+    else
+        log_remove "Warning: Failed to remove profile drop-in"
+    fi
+else
+    log_remove "Profile drop-in not found; skipping"
+fi
+
+#=================================================
+# STEP 6: REMOVE FAIL2BAN CONFIGURATION
+#=================================================
+
+ynh_script_progression "Removing Fail2Ban configuration..."
+
+if ynh_config_remove_fail2ban 2>/dev/null; then
+    log_remove "Fail2Ban configuration removed"
+else
+    log_remove "Warning: Failed to remove Fail2Ban configuration"
+fi
+
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    systemctl reload fail2ban 2>/dev/null || {
+        log_remove "Warning: Failed to reload Fail2Ban"
+    }
+fi
+
+#=================================================
+# STEP 7: REMOVE LOGROTATE CONFIGURATION
+#=================================================
+
+ynh_script_progression "Removing logrotate configuration..."
+
+if ynh_config_remove_logrotate 2>/dev/null; then
+    log_remove "Logrotate configuration removed"
+else
+    log_remove "Warning: Failed to remove logrotate configuration"
+fi
+
+#=================================================
+# STEP 8: REMOVE SERVICE FROM YUNOHOST
+#=================================================
+
+ynh_script_progression "Unregistering service from YunoHost..."
 
 if yunohost service status "$app" >/dev/null 2>&1; then
-    yunohost service remove "$app"
+    if yunohost service remove "$app" 2>/dev/null; then
+        log_remove "Service unregistered from YunoHost"
+    else
+        log_remove "Warning: Failed to unregister service (may already be removed)"
+    fi
+else
+    log_remove "Service not registered with YunoHost; skipping"
 fi
 
-ynh_config_remove_systemd
+#=================================================
+# STEP 9: REMOVE SYSTEMD SERVICE UNIT
+#=================================================
 
-ynh_config_remove_nginx
+ynh_script_progression "Removing systemd service unit..."
+
+if ynh_config_remove_systemd 2>/dev/null; then
+    log_remove "Systemd service unit removed"
+else
+    log_remove "Warning: Failed to remove systemd service unit"
+fi
+
+systemctl daemon-reload 2>/dev/null || {
+    log_remove "Warning: Failed to reload systemd daemon"
+}
 
 #=================================================
-# END OF SCRIPT
+# STEP 10: REMOVE NGINX CONFIGURATION
 #=================================================
+
+ynh_script_progression "Removing NGINX configuration..."
+
+if ynh_config_remove_nginx 2>/dev/null; then
+    log_remove "NGINX configuration removed"
+else
+    log_remove "Warning: Failed to remove NGINX configuration"
+fi
+
+if ynh_systemctl --service="nginx" --action="reload" 2>/dev/null; then
+    log_remove "NGINX reloaded"
+else
+    log_remove "Warning: Failed to reload NGINX"
+fi
+
+#=================================================
+# STEP 11: CLEAN UP LOGS (OPTIONAL)
+#=================================================
+
+ynh_script_progression "Cleaning up log directory..."
+
+if [[ -d "/var/log/$app" ]]; then
+    if [[ -f "/var/log/$app/error.log" ]] || [[ -f "/var/log/$app/$app.log" ]]; then
+        log_remove "Preserving logs in /var/log/$app (data_dir contains credentials)"
+    fi
+
+    chmod -R 755 "/var/log/$app" 2>/dev/null || true
+    chown -R root:root "/var/log/$app" 2>/dev/null || true
+fi
+
+#=================================================
+# STEP 12: REMOVE COMPILE CACHE
+#=================================================
+
+ynh_script_progression "Removing Node.js compile cache..."
+
+local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+if [[ -d "$compile_cache" ]]; then
+    if rm -rf "$compile_cache" 2>/dev/null; then
+        log_remove "Compile cache removed"
+    else
+        log_remove "Warning: Failed to remove compile cache"
+    fi
+else
+    log_remove "Compile cache not found; skipping"
+fi
+
+#=================================================
+# REMOVAL COMPLETE
+#=================================================
+
+log_remove "========================================"
+log_remove "Remove completed successfully"
+log_remove "Note: Data directory preserved at $data_dir"
+log_remove "Use 'yunohost app remove $app --purge' to remove all data"
+log_remove "========================================"
 
 ynh_script_progression "Removal of $app completed"
+ynh_print_info ""
+ynh_print_info "Data preserved at: $data_dir"
+ynh_print_info "Logs preserved at: /var/log/$app"
+ynh_print_info "Use --purge to remove all data"
+
+exit 0

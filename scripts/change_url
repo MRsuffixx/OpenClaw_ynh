@@ -1,6 +1,27 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE CHANGE_URL SCRIPT
+#=================================================
+# Implements the flow defined in AGENTS.md §6.6
+#
+# This script handles domain/path changes for an existing
+# OpenClaw installation. It updates NGINX config and
+# the internal OpenClaw configuration.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: ABORT IF NOT RUNNING AS ROOT
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
@@ -8,45 +29,242 @@ source _common.sh
 source /usr/share/yunohost/helpers
 
 #=================================================
-# STOP SYSTEMD SERVICE
+# TRAP: CLEANUP ON ERROR
+#=================================================
+
+on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        ynh_print_err "Change URL failed with exit code $exit_code"
+    fi
+}
+
+trap on_error ERR
+
+#=================================================
+# CONSTANTS
+#=================================================
+
+OPENCLAW_BIN="$(openclaw_bin)"
+OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+
+export OPENCLAW_BIN
+export OPENCLAW_STATE_DIR
+
+#=================================================
+# LOG FUNCTION
+#=================================================
+
+log_change_url() {
+    local msg="$1"
+    echo "[$(date -Iseconds)] $msg" | tee -a "/var/log/$app/change_url.log" 2>/dev/null || true
+    ynh_print_info "$msg"
+}
+
+#=================================================
+# INITIALIZE LOG
+#=================================================
+
+log_change_url "========================================"
+log_change_url "OpenClaw Change URL Script Started"
+log_change_url "App: $app"
+log_change_url "Old domain: ${old_domain:-<unknown>}"
+log_change_url "New domain: ${new_domain:-<unknown>}"
+log_change_url "Old path: ${old_path:-<unknown>}"
+log_change_url "New path: ${new_path:-<unknown>}"
+log_change_url "========================================"
+
+#=================================================
+# STEP 0: VALIDATE PARAMETERS
+#=================================================
+
+if [[ -z "${new_domain:-}" ]]; then
+    ynh_die "new_domain is required"
+fi
+
+if [[ -z "${new_path:-}" ]]; then
+    ynh_die "new_path is required"
+fi
+
+if [[ "$new_path" != /* ]]; then
+    ynh_die "new_path must be an absolute path starting with /"
+fi
+
+log_change_url "Parameter validation passed"
+
+#=================================================
+# STEP 1: VALIDATE CURRENT STATE
+#=================================================
+
+ynh_script_progression "Validating current installation state..."
+
+if [[ ! -f "$data_dir/openclaw.json" ]]; then
+    ynh_die "OpenClaw configuration not found at $data_dir/openclaw.json. Run install first."
+fi
+
+if [[ ! -x "$OPENCLAW_BIN" ]]; then
+    ynh_die "OpenClaw binary not found at $OPENCLAW_BIN. Run install first."
+fi
+
+log_change_url "Current installation state validated"
+
+#=================================================
+# STEP 2: BACKUP CURRENT CONFIG
+#=================================================
+
+ynh_script_progression "Backing up current configuration..."
+
+local backup_ts
+backup_ts="$(date +%Y%m%d%H%M%S)"
+
+if [[ -f "$data_dir/openclaw.json" ]]; then
+    cp "$data_dir/openclaw.json" "$data_dir/openclaw.json.pre-change-url.${backup_ts}" || {
+        log_change_url "Warning: Failed to backup configuration"
+    }
+    log_change_url "Configuration backed up"
+fi
+
+#=================================================
+# STEP 3: STOP SYSTEMD SERVICE
 #=================================================
 
 ynh_script_progression "Stopping $app's systemd service..."
 
-ynh_systemctl --service="$app" --action="stop"
+if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+    if ynh_systemctl --service="$app" --action="stop" 2>/dev/null; then
+        log_change_url "Service stopped"
+    else
+        log_change_url "Warning: Failed to stop service cleanly"
+    fi
+
+    sleep 2
+
+    if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
+        log_change_url "Warning: Service still running; continuing anyway"
+    fi
+else
+    log_change_url "Service is not running; no need to stop"
+fi
 
 #=================================================
-# MODIFY URL IN NGINX CONF
+# STEP 4: UPDATE NGINX CONFIGURATION
 #=================================================
 
 ynh_script_progression "Updating NGINX web server configuration..."
 
-ynh_config_change_url_nginx
+log_change_url "Calling ynh_config_change_url_nginx..."
+
+if ynh_config_change_url_nginx 2>/dev/null; then
+    log_change_url "NGINX configuration updated"
+else
+    ynh_die "Failed to update NGINX configuration"
+fi
+
+if nginx -t 2>/dev/null; then
+    log_change_url "NGINX configuration test passed"
+else
+    log_change_url "Warning: NGINX configuration test failed"
+fi
+
+if ynh_systemctl --service="nginx" --action="reload" 2>/dev/null; then
+    log_change_url "NGINX reloaded"
+else
+    log_change_url "Warning: Failed to reload NGINX"
+fi
 
 #=================================================
-# UPDATE OPENCLAW.JSON
+# STEP 5: UPDATE OPENCLAW.JSON
 #=================================================
 
 ynh_script_progression "Updating OpenClaw configuration..."
 
-ynh_app_setting_set --key=domain --value="$new_domain"
-ynh_app_setting_set --key=path --value="$new_path"
+log_change_url "Updating settings and config files..."
 
-export OPENCLAW_BIN="$(openclaw_bin)"
-export OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+ynh_app_setting_set --key=domain --value="$new_domain" \
+    || log_change_url "Warning: Failed to save domain to settings"
 
-ynh_config_add --template="openclaw.json" --destination="$data_dir/openclaw.json"
+ynh_app_setting_set --key=path --value="$new_path" \
+    || log_change_url "Warning: Failed to save path to settings"
+
+log_change_url "Settings updated: domain=$new_domain, path=$new_path"
+
+if [[ -f "$data_dir/openclaw.json" ]]; then
+    export new_domain
+    export new_path
+
+    if ynh_config_add --template="openclaw.json" --destination="$data_dir/openclaw.json" 2>/dev/null; then
+        log_change_url "openclaw.json re-rendered with new domain/path"
+    else
+        log_change_url "Warning: Failed to re-render openclaw.json"
+    fi
+
+    if [[ -f "$data_dir/openclaw.json" ]]; then
+        chown "$app:$app" "$data_dir/openclaw.json" 2>/dev/null || {
+            log_change_url "Warning: Failed to set ownership on openclaw.json"
+        }
+        chmod 600 "$data_dir/openclaw.json" 2>/dev/null || {
+            log_change_url "Warning: Failed to secure openclaw.json"
+        }
+    fi
+else
+    log_change_url "Warning: openclaw.json not found; skipping config update"
+fi
 
 #=================================================
-# START SYSTEMD SERVICE
+# STEP 6: VERIFY NGINX CONFIG
+#=================================================
+
+ynh_script_progression "Verifying NGINX configuration..."
+
+if [[ -f "/etc/nginx/conf.d/${new_domain}.d/${app}.conf" ]]; then
+    log_change_url "New NGINX config file exists"
+else
+    log_change_url "Warning: New NGINX config file not found"
+fi
+
+if nginx -t 2>/dev/null; then
+    log_change_url "NGINX configuration is valid"
+else
+    log_change_url "Warning: NGINX configuration test failed"
+fi
+
+#=================================================
+# STEP 7: START SYSTEMD SERVICE
 #=================================================
 
 ynh_script_progression "Starting $app's systemd service..."
 
-ynh_systemctl --service="$app" --action="start"
+if ynh_systemctl --service="$app" --action="start" 2>/dev/null; then
+    log_change_url "Service started"
+else
+    log_change_url "Warning: Failed to start service"
+fi
 
 #=================================================
-# END OF SCRIPT
+# STEP 8: WAIT FOR GATEWAY
 #=================================================
+
+ynh_script_progression "Waiting for gateway to become ready..."
+
+if wait_for_gateway_with_retry "$port" 60; then
+    log_change_url "Gateway is ready and responding"
+else
+    log_change_url "Warning: Gateway failed to become ready within 60 seconds"
+    log_change_url "Check /var/log/$app/error.log for details"
+fi
+
+#=================================================
+# CHANGE URL COMPLETE
+#=================================================
+
+log_change_url "========================================"
+log_change_url "Change URL completed successfully"
+log_change_url "Old URL: https://${old_domain:-}${old_path:-}"
+log_change_url "New URL: https://${new_domain}${new_path}"
+log_change_url "========================================"
 
 ynh_script_progression "Change of URL completed for $app"
+ynh_print_info ""
+ynh_print_info "New URL: https://${new_domain}${new_path}"
+
+exit 0

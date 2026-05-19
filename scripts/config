@@ -1,91 +1,362 @@
 #!/bin/bash
 
 #=================================================
+# OPENCLAW YUNOHOST PACKAGE CONFIG SCRIPT
+#=================================================
+# Implements the config panel logic per AGENTS.md §6.7
+#
+# This script handles getters, setters, and validators
+# for the OpenClaw config panel in YunoHost admin.
+#=================================================
+
+set -euo pipefail
+
+#=================================================
+# FAILSAFE: Abort if not running as root
+#=================================================
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Error: This script must be run as root." >&2
+    exit 1
+fi
+
+#=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
 
 source _common.sh
 source /usr/share/yunohost/helpers
 
+#=================================================
+# ABORT ON YUNOHOST ERRORS
+#=================================================
+
 ynh_abort_if_errors
 
 #=================================================
-# RETRIEVE SETTINGS
+# RETRIEVE SETTINGS AND CONSTANTS
 #=================================================
 
-data_dir="$(ynh_app_setting_get --key=data_dir)"
-app_version="$(ynh_app_setting_get --key=openclaw_version)"
+data_dir="$(ynh_app_setting_get --key=data_dir)" || {
+    ynh_die "Failed to retrieve data_dir from settings"
+}
+
+if [[ -z "$data_dir" ]]; then
+    ynh_die "data_dir is empty or not set"
+fi
+
+config_file="$data_dir/openclaw.json"
+
+OPENCLAW_BIN="$(openclaw_bin)"
+OPENCLAW_STATE_DIR="$(openclaw_state_dir)"
+
+export OPENCLAW_BIN
+export OPENCLAW_STATE_DIR
 
 #=================================================
-# SPECIFIC GETTERS
+# VALIDATE ENVIRONMENT
+#=================================================
+
+validate_environment() {
+    if ! command -v jq &>/dev/null; then
+        ynh_die "jq is required for config operations but is not installed"
+    fi
+
+    if [[ ! -d "$data_dir" ]]; then
+        ynh_die "Data directory does not exist: $data_dir"
+    fi
+
+    if [[ ! -f "$config_file" ]]; then
+        ynh_die "Config file does not exist: $config_file"
+    fi
+}
+
+validate_environment
+
+#=================================================
+# GETTERS
 #=================================================
 
 get__update_channel() {
+    if [[ ! -f "$config_file" ]]; then
+        echo "stable"
+        return 0
+    fi
+
     local channel
-    channel="$(jq -r '.update.channel // "stable"' "$data_dir/openclaw.json" 2>/dev/null)"
-    echo "${channel:-stable}"
+    channel="$(jq -r '.update.channel // "stable"' "$config_file" 2>/dev/null)" || {
+        echo "stable"
+        return 0
+    }
+
+    if [[ -z "$channel" ]] || [[ "$channel" == "null" ]]; then
+        echo "stable"
+    else
+        echo "$channel"
+    fi
 }
 
-set__update_channel() {
-    local value="$1"
-    if [[ "$value" == "dev" ]]; then
-        ynh_die "The 'dev' channel is not supported by this YunoHost package."
+get__auto_update() {
+    if [[ ! -f "$config_file" ]]; then
+        echo "false"
+        return 0
     fi
-    local current
-    current="$(jq -r '.update.channel' "$data_dir/openclaw.json" 2>/dev/null)"
-    if [[ "$current" != "$value" ]]; then
-        jq ".update.channel = \"$value\"" "$data_dir/openclaw.json" > /tmp/openclaw_json_tmp \
-            && mv /tmp/openclaw_json_tmp "$data_dir/openclaw.json"
+
+    local auto_update
+    auto_update="$(jq -r '.update.auto.enabled // false' "$config_file" 2>/dev/null)" || {
+        echo "false"
+        return 0
+    }
+
+    if [[ -z "$auto_update" ]] || [[ "$auto_update" == "null" ]]; then
+        echo "false"
+    else
+        echo "$auto_update"
     fi
-    ynh_app_setting_set --key=update_channel --value="$value"
 }
 
 get__gateway_auth_token() {
+    if [[ ! -f "$config_file" ]]; then
+        echo "YNH_NULL"
+        return 0
+    fi
+
     local token
-    token="$(jq -r '.gateway.auth.token // empty' "$data_dir/openclaw.json" 2>/dev/null)"
-    if [[ -z "$token" ]]; then
+    token="$(jq -r '.gateway.auth.token // empty' "$config_file" 2>/dev/null)" || {
+        echo "YNH_NULL"
+        return 0
+    }
+
+    if [[ -z "$token" ]] || [[ "$token" == "null" ]]; then
         echo "YNH_NULL"
     else
         echo "$token"
     fi
 }
 
-set__gateway_auth_token() {
-    local value="$1"
-    local current
-    current="$(jq -r '.gateway.auth.token // empty' "$data_dir/openclaw.json" 2>/dev/null)"
-    if [[ "$current" != "$value" ]]; then
-        jq ".gateway.auth.token = \"$value\"" "$data_dir/openclaw.json" > /tmp/openclaw_json_tmp \
-            && mv /tmp/openclaw_json_tmp "$data_dir/openclaw.json"
-    fi
-    ynh_app_setting_set --key=gateway_auth_token --value="$value"
-    ynh_systemctl --service="$app" --action="restart"
-}
-
 get__openclaw_version() {
-    if [[ -x "$(openclaw_bin)" ]]; then
-        "$(openclaw_bin)" --version 2>/dev/null | head -n1 || echo "unknown"
-    else
+    if [[ ! -x "$OPENCLAW_BIN" ]]; then
         echo "not installed"
+        return 0
+    fi
+
+    local version
+    version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || {
+        echo "unknown"
+        return 0
+    }
+
+    if [[ -z "$version" ]]; then
+        echo "unknown"
+    else
+        echo "$version"
     fi
 }
 
 get__gateway_status() {
-    if curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 3 --max-time 5 \
+        "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
         echo "running"
     else
         echo "stopped"
     fi
 }
 
+get__public_url() {
+    if [[ ! -f "$config_file" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local url
+    url="$(jq -r '.server.publicUrl // empty' "$config_file" 2>/dev/null)" || {
+        echo ""
+        return 0
+    }
+
+    echo "$url"
+}
+
 #=================================================
-# SPECIFIC VALIDATORS
+# SETTERS
+#=================================================
+
+set__update_channel() {
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        ynh_die "set__update_channel: value cannot be empty"
+    fi
+
+    if [[ "$value" == "dev" ]]; then
+        ynh_die "The 'dev' channel is not supported by this YunoHost package. Use 'stable' or 'beta'."
+    fi
+
+    case "$value" in
+        stable|beta) ;;
+        *)
+            ynh_die "Invalid update channel: '$value'. Must be 'stable' or 'beta'."
+            ;;
+    esac
+
+    if [[ ! -f "$config_file" ]]; then
+        ynh_die "Config file not found: $config_file"
+    fi
+
+    local current
+    current="$(jq -r '.update.channel // empty' "$config_file" 2>/dev/null)" || current=""
+
+    if [[ "$current" != "$value" ]]; then
+        local tmp_file
+        tmp_file="$(mktemp)"
+
+        if ! jq ".update.channel = \"$value\"" "$config_file" > "$tmp_file" 2>/dev/null; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to update update.channel in $config_file"
+        fi
+
+        if ! mv "$tmp_file" "$config_file"; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to save updated config to $config_file"
+        fi
+
+        chown "$app:$app" "$config_file" 2>/dev/null || true
+        chmod 600 "$config_file" 2>/dev/null || true
+    fi
+
+    ynh_app_setting_set --key=update_channel --value="$value" \
+        || ynh_print_warn "Failed to save update_channel to YunoHost settings"
+
+    ynh_print_info "Update channel set to: $value"
+}
+
+set__auto_update() {
+    local value="$1"
+
+    if [[ ! -f "$config_file" ]]; then
+        ynh_die "Config file not found: $config_file"
+    fi
+
+    case "$value" in
+        true|1) value="true" ;;
+        false|0) value="false" ;;
+        *)
+            ynh_die "Invalid auto_update value: '$value'. Must be true/false or 1/0."
+            ;;
+    esac
+
+    local current
+    current="$(jq -r '.update.auto.enabled // false' "$config_file" 2>/dev/null)" || current="false"
+
+    if [[ "$current" != "$value" ]]; then
+        local tmp_file
+        tmp_file="$(mktemp)"
+
+        if ! jq ".update.auto.enabled = $value" "$config_file" > "$tmp_file" 2>/dev/null; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to update update.auto.enabled in $config_file"
+        fi
+
+        if ! mv "$tmp_file" "$config_file"; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to save updated config to $config_file"
+        fi
+
+        chown "$app:$app" "$config_file" 2>/dev/null || true
+        chmod 600 "$config_file" 2>/dev/null || true
+    fi
+
+    ynh_app_setting_set --key=auto_update --value="$value" \
+        || ynh_print_warn "Failed to save auto_update to YunoHost settings"
+
+    ynh_print_info "Auto update set to: $value"
+}
+
+set__gateway_auth_token() {
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        ynh_die "set__gateway_auth_token: value cannot be empty"
+    fi
+
+    if [[ ${#value} -lt 16 ]]; then
+        ynh_die "Gateway auth token must be at least 16 characters. Provided: ${#value} characters."
+    fi
+
+    if [[ ! -f "$config_file" ]]; then
+        ynh_die "Config file not found: $config_file"
+    fi
+
+    local current
+    current="$(jq -r '.gateway.auth.token // empty' "$config_file" 2>/dev/null)" || current=""
+
+    if [[ "$current" != "$value" ]]; then
+        local tmp_file
+        tmp_file="$(mktemp)"
+
+        if ! jq ".gateway.auth.token = \"$value\"" "$config_file" > "$tmp_file" 2>/dev/null; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to update gateway.auth.token in $config_file"
+        fi
+
+        if ! mv "$tmp_file" "$config_file"; then
+            rm -f "$tmp_file"
+            ynh_die "Failed to save updated config to $config_file"
+        fi
+
+        chown "$app:$app" "$config_file" 2>/dev/null || true
+        chmod 600 "$config_file" 2>/dev/null || true
+    fi
+
+    ynh_app_setting_set --key=gateway_auth_token --value="$value" \
+        || ynh_print_warn "Failed to save gateway_auth_token to YunoHost settings"
+
+    ynh_print_info "Gateway auth token updated successfully"
+
+    ynh_print_info "Restarting gateway service to apply new token..."
+    ynh_systemctl --service="$app" --action="restart" \
+        || ynh_print_warn "Failed to restart gateway service; it may need manual restart"
+}
+
+#=================================================
+# VALIDATORS
 #=================================================
 
 validate__gateway_auth_token() {
-    if [[ ${#gateway_auth_token} -lt 16 ]]; then
-        echo "Token must be at least 16 characters."
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        echo "Token cannot be empty."
+        return 1
     fi
+
+    if [[ ${#value} -lt 16 ]]; then
+        echo "Token must be at least 16 characters. Provided: ${#value} characters."
+        return 1
+    fi
+
+    return 0
+}
+
+validate__update_channel() {
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        echo "Update channel cannot be empty."
+        return 1
+    fi
+
+    case "$value" in
+        stable|beta) return 0 ;;
+        dev)
+            echo "The 'dev' channel is not supported by this YunoHost package."
+            return 1
+            ;;
+        *)
+            echo "Invalid update channel: '$value'. Must be 'stable' or 'beta'."
+            return 1
+            ;;
+    esac
 }
 
 #=================================================
