@@ -20,8 +20,8 @@ Restart=always
 RestartSec=2
 TimeoutStartSec=90
 TimeoutStopSec=30
-StandardOutput=append:/var/log/__APP__/__APP__.log
-StandardError=append:/var/log/__APP__/error.log
+StandardOutput=file:/var/log/__APP__/__APP__.log
+StandardError=file:/var/log/__APP__/error.log
 
 [Install]
 WantedBy=multi-user.target
