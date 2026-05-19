@@ -9,9 +9,101 @@ set -euo pipefail
 #=================================================
 # CONSTANTS
 #=================================================
-
+# NOTE: INSTALL_CLI_SHA256 must be updated whenever install-cli.sh changes.
+# Run: curl -fsSL https://openclaw.ai/install-cli.sh | sha256sum
+# Then update the value below.
 INSTALL_CLI_URL="https://openclaw.ai/install-cli.sh"
 INSTALL_CLI_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+
+#=================================================
+# GITHUB RELEASE INFO FETCHER
+#=================================================
+# Fetches the latest release version and asset download URL from GitHub.
+# Usage: source=$(get_latest_github_release "openclaw" "openclaw")
+# Returns: asset_name (e.g., "OpenClaw-2026.5.18.zip")
+#
+# To get the full URL and SHA256 for a specific asset:
+#   release_info=$(get_github_release_info "openclaw" "openclaw" "OpenClaw-{{version}}.zip")
+#   url=$(echo "$release_info" | jq -r '.url')
+#   sha256=$(echo "$release_info" | jq -r '.sha256')
+#=================================================
+
+get_latest_github_release() {
+    local repo="$1"
+    local asset_name_template="${2:-{{version}}}"
+
+    if ! command -v curl &>/dev/null || ! command -v jq &>/dev/null; then
+        ynh_die "get_latest_github_release: curl and jq are required"
+    fi
+
+    local api_url="https://api.github.com/repos/${repo}/releases/latest"
+
+    local response
+    response="$(curl -fsSL --proto '=https' --tlsv1.2 -H "Accept: application/vnd.github+json" \
+        "$api_url" 2>/dev/null)" || {
+        ynh_die "Failed to fetch latest release from GitHub API"
+    }
+
+    local tag_name
+    tag_name="$(echo "$response" | jq -r '.tag_name // empty')" || {
+        ynh_die "Failed to parse tag_name from GitHub release"
+    }
+
+    if [[ -z "$tag_name" ]] || [[ "$tag_name" == "null" ]]; then
+        ynh_die "No release found for ${repo}"
+    fi
+
+    local version="${tag_name#v}"
+
+    echo "$version"
+}
+
+get_github_asset_info() {
+    local repo="$1"
+    local asset_pattern="$2"
+    local version="${3:-}"
+
+    if ! command -v curl &>/dev/null || ! command -v jq &>/dev/null; then
+        ynh_die "get_github_asset_info: curl and jq are required"
+    fi
+
+    local api_url
+    if [[ -n "$version" ]]; then
+        api_url="https://api.github.com/repos/${repo}/releases/tags/v${version}"
+    else
+        api_url="https://api.github.com/repos/${repo}/releases/latest"
+    fi
+
+    local response
+    response="$(curl -fsSL --proto '=https' --tlsv1.2 -H "Accept: application/vnd.github+json" \
+        "$api_url" 2>/dev/null)" || {
+        ynh_die "Failed to fetch release info from GitHub API"
+    }
+
+    local tag_name
+    tag_name="$(echo "$response" | jq -r '.tag_name // empty')" || {
+        ynh_die "Failed to parse tag_name"
+    }
+
+    local version_only="${tag_name#v}"
+
+    local assets_json
+    assets_json="$(echo "$response" | jq -r '.assets[] | select(.name | match("'"$asset_pattern"'"))')" || {
+        ynh_die "No asset matching '${asset_pattern}' found"
+    }
+
+    local asset_name
+    asset_name="$(echo "$assets_json" | jq -r '.name')" || {
+        ynh_die "Failed to parse asset name"
+    }
+
+    local browser_download_url
+    browser_download_url="$(echo "$assets_json" | jq -r '.browser_download_url')" || {
+        ynh_die "Failed to parse download URL"
+    }
+
+    echo "${version_only}|${asset_name}|${browser_download_url}"
+}
 
 #=================================================
 # PATH HELPERS
