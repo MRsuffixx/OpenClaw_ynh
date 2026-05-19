@@ -13,7 +13,7 @@ set -euo pipefail
 # Run: curl -fsSL https://openclaw.ai/install-cli.sh | sha256sum
 # Then update the value below.
 INSTALL_CLI_URL="https://openclaw.ai/install-cli.sh"
-INSTALL_CLI_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+INSTALL_CLI_SHA256="26F0D81F160A3822EF676E4089B7CAB0B7055149CBF503499B6F71BE82EE95EF"
 
 #=================================================
 # GITHUB RELEASE INFO FETCHER
