@@ -142,7 +142,7 @@ fi
 
 ynh_script_progression "Removing profile drop-in..."
 
-local profile_dropin="/etc/profile.d/openclaw_${app}.sh"
+profile_dropin="/etc/profile.d/openclaw_${app}.sh"
 if [[ -f "$profile_dropin" ]]; then
     if ynh_safe_rm "$profile_dropin" 2>/dev/null; then
         log_remove "Profile drop-in removed"
@@ -254,7 +254,7 @@ fi
 
 ynh_script_progression "Removing Node.js compile cache..."
 
-local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+compile_cache="/var/tmp/openclaw-compile-cache-${app}"
 if [[ -d "$compile_cache" ]]; then
     if rm -rf "$compile_cache" 2>/dev/null; then
         log_remove "Compile cache removed"

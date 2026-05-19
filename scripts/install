@@ -220,7 +220,7 @@ run_as_openclaw bash "$localInstaller" \
     --json 2>&1 \
     | tee -a "$install_log"
 
-local install_exit_status=${PIPESTATUS[0]}
+install_exit_status=${PIPESTATUS[0]}
 
 rm -f "$localInstaller"
 
@@ -250,7 +250,7 @@ if [[ ! -d "$OPENCLAW_STATE_DIR" ]]; then
     ynh_die "OpenClaw state directory not found at $OPENCLAW_STATE_DIR after installation"
 fi
 
-local openclaw_version_installed
+openclaw_version_installed
 openclaw_version_installed="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || {
     ynh_die "Failed to run '$OPENCLAW_BIN --version'. Binary may be corrupted."
 }
@@ -290,7 +290,7 @@ ynh_print_info "Gateway configuration written to $data_dir/openclaw.json"
 
 ynh_script_progression "Creating PATH drop-in for CLI access..."
 
-local profile_dropin="/etc/profile.d/openclaw_${app}.sh"
+profile_dropin="/etc/profile.d/openclaw_${app}.sh"
 
 cat > "$profile_dropin" << EOF
 # OpenClaw CLI PATH - managed by YunoHost package
@@ -406,7 +406,7 @@ fi
 
 ynh_script_progression "Creating Node.js compile cache directory..."
 
-local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+compile_cache="/var/tmp/openclaw-compile-cache-${app}"
 mkdir -p "$compile_cache" || {
     ynh_print_warn "Failed to create compile cache directory at $compile_cache"
 }

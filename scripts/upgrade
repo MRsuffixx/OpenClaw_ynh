@@ -64,7 +64,7 @@ if [[ ! -f "$data_dir/openclaw.json" ]]; then
     ynh_die "OpenClaw configuration not found at $data_dir/openclaw.json. Run install first."
 fi
 
-local current_version
+current_version
 current_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || current_version="unknown"
 ynh_print_info "Current OpenClaw version: $current_version"
 
@@ -109,8 +109,7 @@ ynh_print_info "Downward compatibility checks completed"
 ynh_script_progression "Backing up current configuration..."
 
 if [[ -f "$data_dir/openclaw.json" ]]; then
-    local backup_ts
-    backup_ts="$(date +%Y%m%d%H%M%S)"
+    backup_ts
     cp "$data_dir/openclaw.json" "$data_dir/openclaw.json.pre-upgrade.${backup_ts}" || {
         ynh_print_warn "Failed to backup current configuration"
     }
@@ -169,7 +168,7 @@ chown "$app:$app" "/var/log/$app" 2>/dev/null || {
     ynh_print_warn "Failed to set log directory ownership"
 }
 
-local upgrade_log="/var/log/$app/upgrade.log"
+upgrade_log="/var/log/$app/upgrade.log"
 
 {
     echo "========================================"
@@ -186,7 +185,7 @@ local upgrade_log="/var/log/$app/upgrade.log"
 
 ynh_script_progression "Updating OpenClaw..."
 
-local update_success=false
+update_success=false
 
 if run_as_openclaw "$OPENCLAW_BIN" update \
         --channel "$update_channel" --yes --non-interactive --json 2>&1 \
@@ -196,7 +195,7 @@ if run_as_openclaw "$OPENCLAW_BIN" update \
 else
     ynh_print_warn "openclaw update command failed; falling back to install-cli.sh method"
 
-    local installer_tmp="/tmp/openclaw_install_upgrade_$$.sh"
+    installer_tmp="/tmp/openclaw_install_upgrade_$$.sh"
 
     if download_verified "$INSTALL_CLI_URL" "$installer_tmp" "$INSTALL_CLI_SHA256"; then
         chmod +x "$installer_tmp" || {
@@ -213,7 +212,7 @@ else
                 --set-npm-prefix \
                 --json 2>&1 | tee -a "$upgrade_log"
 
-            local installer_exit=${PIPESTATUS[0]}
+            installer_exit=${PIPESTATUS[0]}
             rm -f "$installer_tmp"
 
             if [[ $installer_exit -eq 0 ]]; then
@@ -239,7 +238,7 @@ fi
 if [[ -f "$data_dir/openclaw.json.pre-upgrade."* ]]; then
     if [[ ! -f "$data_dir/openclaw.json" ]] || [[ ! -s "$data_dir/openclaw.json" ]]; then
         ynh_print_warn "Config appears corrupted after update; restoring from backup"
-        local latest_backup
+        latest_backup
         latest_backup="$(ls -t "$data_dir"/openclaw.json.pre-upgrade.* 2>/dev/null | head -1)"
         if [[ -n "$latest_backup" ]] && [[ -f "$latest_backup" ]]; then
             cp "$latest_backup" "$data_dir/openclaw.json" || {
@@ -291,7 +290,7 @@ if [[ -d "/var/log/$app" ]]; then
 fi
 
 # Ensure compile cache directory exists
-local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+compile_cache="/var/tmp/openclaw-compile-cache-${app}"
 if [[ ! -d "$compile_cache" ]]; then
     mkdir -p "$compile_cache" || {
         ynh_print_warn "Failed to create compile cache directory"
@@ -361,7 +360,7 @@ ynh_print_info "Gateway service started"
 
 ynh_script_progression "Verifying upgrade..."
 
-local new_version
+new_version
 new_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || new_version="unknown"
 
 {

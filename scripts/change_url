@@ -114,8 +114,7 @@ log_change_url "Current installation state validated"
 
 ynh_script_progression "Backing up current configuration..."
 
-local backup_ts
-backup_ts="$(date +%Y%m%d%H%M%S)"
+backup_ts
 
 if [[ -f "$data_dir/openclaw.json" ]]; then
     cp "$data_dir/openclaw.json" "$data_dir/openclaw.json.pre-change-url.${backup_ts}" || {

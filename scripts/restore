@@ -76,7 +76,7 @@ log_restore "========================================"
 
 ynh_script_progression "Validating backup archive..."
 
-local required_paths=(
+required_paths=(
     "$install_dir"
     "$data_dir"
 )
@@ -288,7 +288,7 @@ fi
 
 ynh_script_progression "Creating Node.js compile cache directory..."
 
-local compile_cache="/var/tmp/openclaw-compile-cache-${app}"
+compile_cache="/var/tmp/openclaw-compile-cache-${app}"
 if [[ ! -d "$compile_cache" ]]; then
     mkdir -p "$compile_cache" || {
         log_restore "Warning: Failed to create compile cache directory"
@@ -404,7 +404,7 @@ if [[ -x "$OPENCLAW_BIN" ]]; then
             log_restore "Warning: OpenClaw doctor reported issues"
         }
 
-    local restored_version
+    restored_version
     restored_version="$("$OPENCLAW_BIN" --version 2>/dev/null | head -n1)" || restored_version="unknown"
     log_restore "Restored OpenClaw version: $restored_version"
 else
